@@ -165,3 +165,50 @@ test('a row with no option for the real value is reported, not failed', async (t
     assert.deepEqual(result.missingRequired, ['Prescription']);
   });
 });
+
+/**
+ * A row that offers the same quantity in a different unit.
+ *
+ * Real upload log: source "Shelf Life: 36 months" against a row offering
+ * "1 years | 1.5 years | 2 years | 2.5 years | 3 years" and no "Other" box, so
+ * the field was left unset even though 36 months is exactly 3 years.
+ */
+test('a value the row spells in another unit is still set, never rounded', async (t) => {
+  const { chromium } = await import('playwright');
+  const { fillSpecs, equivalentValues } = await import('../src/uploader/specFiller.js');
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  t.after(() => browser.close());
+
+  const shelfLife = (values) => `
+    <div><span>Shelf Life</span>${values
+      .map((v) => `<label><input type="radio" name="sl" value="${v}">${v}</label>`)
+      .join('')}</div>`;
+  const YEARS = ['1 years', '1.5 years', '2 years', '2.5 years', '3 years'];
+
+  await t.test('36 months is ticked as the row’s own "3 years"', async () => {
+    await page.setContent(shelfLife(YEARS));
+    const result = await fillSpecs(page, { specs: { 'Shelf Life': '36 months' } });
+
+    assert.equal(await page.locator('input[value="3 years"]').isChecked(), true);
+    assert.ok(result.done.includes('Shelf Life=3 years'));
+    assert.deepEqual(result.unrepresentable, []);
+  });
+
+  await t.test('only exact conversions are offered', () => {
+    assert.deepEqual(equivalentValues('36 months'), ['3 years', '3 year']);
+    assert.deepEqual(equivalentValues('30 months'), ['2.5 years', '2.5 year']);
+    assert.deepEqual(equivalentValues('2 years'), ['24 months', '24 month']);
+    // 20/12 does not come out clean, so nothing is claimed for it.
+    assert.deepEqual(equivalentValues('20 months'), []);
+    assert.deepEqual(equivalentValues('Strip'), []);
+  });
+
+  await t.test('a quantity the row genuinely lacks is still left unset', async () => {
+    await page.setContent(shelfLife(['1 years', '2 years']));
+    const result = await fillSpecs(page, { specs: { 'Shelf Life': '36 months' } });
+
+    assert.equal(await page.locator('input:checked').count(), 0);
+    assert.deepEqual(result.unrepresentable.map((f) => f.group), ['Shelf Life']);
+  });
+});

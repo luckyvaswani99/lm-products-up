@@ -182,6 +182,36 @@ async function chooseOption(input) {
   return input.isChecked().catch(() => false);
 }
 
+/**
+ * Other spellings of the SAME quantity, for rows that offer a different unit.
+ *
+ * Observed on a real upload: source data "Shelf Life: 36 months" against a row
+ * offering "1 years | 1.5 years | 2 years | 2.5 years | 3 years" and no "Other"
+ * box. 36 months *is* 3 years, so leaving it blank threw away a value we
+ * actually had. Only exact conversions are produced — 30 months is 2.5 years,
+ * but 20 months converts to nothing because 20/12 does not come out clean.
+ * Nothing is rounded and no other unit is touched.
+ */
+export function equivalentValues(value) {
+  const text = String(value || '').trim();
+  const out = [];
+
+  const asMonths = text.match(/^(\d+(?:\.\d+)?)\s*months?$/i);
+  if (asMonths) {
+    const months = Number(asMonths[1]);
+    const years = Number((months / 12).toFixed(2));
+    if (years * 12 === months) out.push(`${years} years`, `${years} year`);
+  }
+
+  const asYears = text.match(/^(\d+(?:\.\d+)?)\s*years?$/i);
+  if (asYears) {
+    const months = Number(asYears[1]) * 12;
+    if (Number.isInteger(months)) out.push(`${months} months`, `${months} month`);
+  }
+
+  return out;
+}
+
 async function trySelect({ page, group, candidates = [], other }) {
   const row = groupRow(page, group);
   if (!(await row.isVisible().catch(() => false))) return { group, selected: false, present: false };
@@ -189,7 +219,8 @@ async function trySelect({ page, group, candidates = [], other }) {
   const options = row.locator('input[type="radio"], input[type="checkbox"]');
   const optionValues = await options.evaluateAll((inputs) => inputs.map((input) => input.value));
   let matched = false;
-  for (const candidate of candidates) {
+  const tried = candidates.flatMap((candidate) => [candidate, ...equivalentValues(candidate)]);
+  for (const candidate of tried) {
     const wanted = comparable(candidate);
     if (!wanted) continue;
     const index = optionValues.findIndex((value) => comparable(value) === wanted);
