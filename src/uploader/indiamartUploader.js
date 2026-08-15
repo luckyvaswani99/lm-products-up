@@ -69,7 +69,7 @@ function stripSupplierName(value) {
 }
 
 /** Match IndiaMART's product-name validation and the field's maxlength=100. */
-function uploadProductName(product) {
+export function uploadProductName(product) {
   const raw = stripSupplierName(product.seo?.name || product.name || '');
   return raw
     .normalize('NFKD')
@@ -161,6 +161,51 @@ export async function waitForCropSelection(page, crop, expectedTotal, baseline =
   );
 }
 
+/**
+ * Read IndiaMART's photo-rejection modal, if it appears.
+ *
+ * Clicking "Upload Photos" posts the selection to `uploading.imimg.com/dedup`.
+ * Photos that service considers the listing already has are dropped and
+ * announced in a `.modal_dedup` popup — "Photo rejected during upload! … Photo
+ * already available in Product" — which closes itself after about four
+ * seconds. Nothing else reports it: the CDN upload returns 200, the cropper
+ * shows the photo, and the listing simply never gains it. That is why one
+ * product retried "2/3 source photos" for ever with no reason given.
+ *
+ * Returns one entry per refused file, and dismisses the modal.
+ */
+export async function readPhotoRejections(page, timeout = 4000) {
+  const modal = page.locator('.modal_dedup, #modal_dedup').first();
+  const appeared = await modal
+    .waitFor({ state: 'visible', timeout })
+    .then(() => true)
+    .catch(() => false);
+  if (!appeared) return [];
+
+  const rejected = await modal
+    .evaluate((el) =>
+      [...el.querySelectorAll('.dedup-rejection-section')].flatMap((section) => {
+        const reason = (section.querySelector('.dedup-rejection-heading')?.innerText || 'rejected').trim();
+        return [...section.querySelectorAll('li')].map((item) => ({
+          reason,
+          file: (item.querySelector('a')?.innerText || item.innerText || '').replace(/^✖\s*/, '').trim(),
+        }));
+      }),
+    )
+    .catch(() => []);
+
+  await modal.getByText(/^OK$/i).last().click({ timeout: 2000 }).catch(() => {});
+  await modal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  return rejected;
+}
+
+/** Report photos IndiaMART refused, naming its own reason for each. */
+function logPhotoRejections(rejected, itemLabel) {
+  if (!rejected.length) return;
+  log.warn(`  IndiaMART refused ${rejected.length} photo(s)${itemLabel ? ` for ${itemLabel}` : ''}:`);
+  rejected.forEach((entry) => log.warn(`    ${entry.file || 'a photo'} — ${entry.reason}`));
+}
+
 /** Close IndiaMART's "suggested products" / promo modals if one is open. */
 async function dismissPopups(page) {
   const closers = [
@@ -192,6 +237,36 @@ export class Uploader {
 
   async close() {
     if (this.ctx) await this.ctx.close();
+  }
+
+  /**
+   * Screenshot the portal exactly as it stood when a product failed, next to a
+   * note of the URL and every dialog/overlay that was on screen. The overlays
+   * are the usual culprit and they are gone by the time anyone looks.
+   */
+  async captureFailure(product) {
+    const page = this.page;
+    if (!page || page.isClosed?.()) return null;
+    const file = path.join(config.dataDir, `upload-fail-${product.id}.png`);
+    await page.screenshot({ path: file, fullPage: false });
+    const layers = await page
+      .locator('[role="dialog"], [class*="modal"], [class*="overlay"], [class*="popup"]')
+      .evaluateAll((nodes) =>
+        nodes
+          .filter((node) => {
+            const box = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+          })
+          .map((node) => (node.id || node.className || 'unnamed').toString().slice(0, 60))
+          .slice(0, 6),
+      )
+      .catch(() => []);
+    fs.writeFileSync(
+      file.replace(/\.png$/, '.txt'),
+      `url: ${page.url()}\nvisible layers: ${layers.join(' | ') || 'none'}\n`,
+    );
+    return file;
   }
 
   async gotoManage() {
@@ -367,12 +442,28 @@ export class Uploader {
     if (product.price !== '' && product.price != null)
       await (await formField(form, 'priceOfProduct', SEL.price)).fill(String(product.price));
     if (product.unit) {
-      await (await formField(form, 'unitOfProduct', SEL.unit)).fill(String(product.unit));
-      await p.waitForTimeout(500);
-      // The current portal requires choosing a suggested unit; typing alone
-      // leaves its internal unit value unset and Save and Continue does nothing.
-      const unitChoice = p.locator('#unitSugg li').first();
-      if (await unitChoice.isVisible().catch(() => false)) await unitChoice.click();
+      const unitField = await formField(form, 'unitOfProduct', SEL.unit);
+      // On an existing listing IndiaMART locks the unit: the input renders
+      // `disabled`, and filling it just stalls until the 30s action timeout.
+      // Read what the listing already carries instead of hanging on it.
+      if (await unitField.isDisabled().catch(() => false)) {
+        const current = (await unitField.inputValue().catch(() => '')).trim();
+        if (slugify(current) === slugify(String(product.unit))) {
+          log.info(`  unit already set to "${current}" and locked by IndiaMART — left as is`);
+        } else {
+          log.warn(
+            `  unit is locked by IndiaMART on this listing: it reads "${current || '(empty)'}" ` +
+              `while the product says "${product.unit}". Change it on the portal if it matters.`,
+          );
+        }
+      } else {
+        await unitField.fill(String(product.unit));
+        await p.waitForTimeout(500);
+        // The current portal requires choosing a suggested unit; typing alone
+        // leaves its internal unit value unset and Save and Continue does nothing.
+        const unitChoice = p.locator('#unitSugg li').first();
+        if (await unitChoice.isVisible().catch(() => false)) await unitChoice.click();
+      }
     }
 
     await this._fillDescription(product);
@@ -508,6 +599,7 @@ export class Uploader {
         log.info(`  crop popup holds ${confirmed}/${images.length} selected photo(s)`);
         const uploadPhoto = crop.getByText(/^Upload Photos?$/, { exact: true }).last();
         await uploadPhoto.click({ timeout: 10000 });
+        logPhotoRejections(await readPhotoRejections(p), 'this new listing');
         await crop.waitFor({ state: 'hidden', timeout: 30000 });
       } else {
         // Older portal variants attach the gallery without a cropper.
@@ -1060,6 +1152,8 @@ export class Uploader {
       log.info(`  crop popup holds ${confirmed}/${expectedTotal} photo(s) for item ${live.itemId}`);
       const uploadPhotos = crop.getByText(/^Upload Photos?$/, { exact: true }).last();
       await uploadPhotos.click({ timeout: 10000 });
+      const rejected = await readPhotoRejections(this.page, 8000);
+      logPhotoRejections(rejected, `item ${live.itemId}`);
       await crop.waitFor({ state: 'hidden', timeout: 30000 });
       await this.page.waitForTimeout(2000);
 
@@ -1069,15 +1163,28 @@ export class Uploader {
         throw new Error(`Could not verify IndiaMART item ${live.itemId} after adding gallery photos`);
       }
       const verifiedUrls = await this._livePhotoUrls(verified);
-      if (verifiedUrls.length < desiredFiles.length) {
+      if (verifiedUrls.length + rejected.length < desiredFiles.length) {
         throw new Error(
           `IndiaMART item ${live.itemId} retained ${verifiedUrls.length}/${desiredFiles.length} source photos`,
+        );
+      }
+      // A photo IndiaMART's own dedup service refuses cannot be added by
+      // retrying, so it is a known gap rather than a failure.
+      if (verifiedUrls.length < desiredFiles.length) {
+        log.warn(
+          `  item ${live.itemId} keeps ${verifiedUrls.length}/${desiredFiles.length} photos; ` +
+            'IndiaMART will not store the rest',
         );
       }
       missingFiles.forEach((file, index) => {
         log.info(`  missing photo ${index + 1}/${missingFiles.length} added: ${path.basename(file)}`);
       });
-      return { live: verified, photoCount: verifiedUrls.length, added: missingFiles.length };
+      return {
+        live: verified,
+        photoCount: verifiedUrls.length,
+        added: missingFiles.length,
+        refused: rejected.length,
+      };
     } finally {
       for (const item of prepared) {
         if (item.temporary) fs.unlinkSync(item.filePath);
@@ -1104,7 +1211,10 @@ export class Uploader {
       throw new Error(`Could not verify repaired IndiaMART item ${itemId}`);
     }
     const photoUrls = await this._livePhotoUrls(verified);
-    if (photoUrls.length < desiredPhotoCount) {
+    // Photos IndiaMART refused as already-present are counted here too: they
+    // are gone for good, and failing the whole listing over them only produces
+    // a product that can never finish.
+    if (photoUrls.length + (media.refused || 0) < desiredPhotoCount) {
       throw new Error(`IndiaMART item ${itemId} has only ${photoUrls.length}/${desiredPhotoCount} source photos`);
     }
     const pdfName = await this._pdfName(verified.card);

@@ -10,7 +10,7 @@ import { readProductPages, scrapeCatalog } from './scraper/catalogScraper.js';
 import { downloadImages } from './images/downloader.js';
 import { regenerateImage } from './images/aiImage.js';
 import { generateSeo } from './ai/seoContent.js';
-import { Uploader } from './uploader/indiamartUploader.js';
+import { Uploader, uploadProductName } from './uploader/indiamartUploader.js';
 import { productImageFiles } from './images/productImageFiles.js';
 
 async function withStore(fn) {
@@ -69,12 +69,37 @@ export async function runScrapeCatalog({ urls, limit } = {}) {
  */
 export async function repairMissingSpecs() {
   const store = await new Store().load();
-  const broken = store
-    .all()
-    .filter((p) => !Object.keys(p.specs || {}).length && /proddetail/.test(p.sourceUrl || ''));
-  if (!broken.length) {
+  const missing = store.all().filter((p) => !Object.keys(p.specs || {}).length);
+  if (!missing.length) {
     log.ok('no products are missing specifications');
-    return { repaired: 0, failed: 0 };
+    return { repaired: 0, failed: 0, unreachable: 0 };
+  }
+
+  // A record whose source is a category page plus "#id" has no product page of
+  // its own to read. Verified on kyvex-global/skin-care.html: it renders 40
+  // cards but only 38 product links, and the two without one are exactly the
+  // products stuck on "no specifications". Re-reading can never fix those, and
+  // the old filter dropped them silently — so the repair reported "nothing to
+  // do" while they stayed unuploadable.
+  const broken = missing.filter((p) => /proddetail/.test(p.sourceUrl || ''));
+  const unreachable = missing.filter((p) => !/proddetail/.test(p.sourceUrl || ''));
+  if (unreachable.length) {
+    log.warn(`  ${unreachable.length} product(s) have no IndiaMART product page to read specifications from:`);
+    for (const product of unreachable) {
+      log.warn(`    ${product.name.slice(0, 50)} — the seller lists only a card on ${String(product.sourceUrl).split('#')[0]}`);
+      store.markStage(
+        product,
+        'uploaded',
+        'error',
+        'no specifications — IndiaMART has no product page for this listing, so they cannot be read. ' +
+          'Add them by hand in Specs JSON, then upload.',
+      );
+    }
+    await store.save();
+  }
+  if (!broken.length) {
+    log.warn('no product page could be re-read');
+    return { repaired: 0, failed: 0, unreachable: unreachable.length };
   }
 
   log.step(`re-reading ${broken.length} product page(s) with missing specifications`);
@@ -114,7 +139,7 @@ export async function repairMissingSpecs() {
   const failed = broken.length - repaired;
   if (failed) log.warn(`  ${failed} product(s) still have no specifications`);
   log.ok(`repaired ${repaired} product(s); run Images, then Upload`);
-  return { repaired, failed };
+  return { repaired, failed, unreachable: unreachable.length };
 }
 
 // ---------------- scrape a single product URL ----------------
@@ -319,11 +344,19 @@ export function uploadBlockers(product) {
 export function duplicateListingNames(products) {
   const byKey = new Map();
   for (const product of products) {
-    const keys = new Set([product.seo?.name, product.name].filter(Boolean).map(slugify));
-    for (const key of keys) {
-      if (!byKey.has(key)) byKey.set(key, new Set());
-      byKey.get(key).add(product);
-    }
+    // Judge the name that is actually submitted, by token set.
+    //
+    // Keying on the raw scraped name as well blocked genuinely different
+    // products: two Mupiheal ointments (15 g and 30 g) share the scraped title
+    // "2% mupiheal Mupirocin Ointment" but upload as "Mupiheal 2% w/w Mupirocin
+    // Cream 30g" and "2% Mupiheal Mupirocin Ointment", and both sat
+    // unuploadable through ten retries. Token order is not a difference
+    // either — "0.1% Adakleen Adapalene Gel" and "Adakleen Adapalene Gel 0.1%"
+    // are one listing, and slugify alone would have let both through.
+    const key = listingKey(uploadProductName(product));
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, new Set());
+    byKey.get(key).add(product);
   }
   const clashes = new Map();
   for (const [key, group] of byKey) {
@@ -480,8 +513,13 @@ export async function runUpload({
             aborted = e;
             break;
           }
+          // Capture what the portal actually looked like when it broke.
+          // Without this every failure has to be reproduced by hand before it
+          // can even be read.
+          const shot = await up.captureFailure(p).catch(() => null);
           store.markStage(p, 'uploaded', 'error', e);
           log.error(`  upload ✗ ${p.name.slice(0, 45)}: ${e.message}`);
+          if (shot) log.warn(`    page at the moment of failure: ${shot}`);
         }
         await store.save();
       }
