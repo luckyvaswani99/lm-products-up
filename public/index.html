@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IndiaMART Products Uploader</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="logo">IM</span>
+        <div>
+          <h1>IndiaMART Products Uploader</h1>
+          <p class="sub">scrape → AI image → DeepSeek SEO → upload</p>
+        </div>
+      </div>
+      <div class="pills" id="statusPills"></div>
+    </header>
+
+    <section class="toolbar">
+      <div class="group">
+        <button class="btn" data-act="login">🔐 Login</button>
+        <button class="btn ghost" data-act="testseo" title="Check the DeepSeek text model">🧪 Test text</button>
+        <button class="btn ghost" data-act="testimage" title="Check the AI image model">🧪 Test image</button>
+        <span class="chips" id="configChips"></span>
+      </div>
+
+      <div class="group">
+        <input id="importFile" class="inp" placeholder="path to products .json (import)" />
+        <button class="btn ghost" data-act="import">Import</button>
+      </div>
+
+      <div class="group pdf-config" title="This same PDF is attached to every product upload">
+        <input id="productPdfFile" type="file" accept="application/pdf,.pdf" hidden />
+        <label class="btn ghost" for="productPdfFile">📄 Select / Replace PDF</label>
+        <span id="productPdfStatus" class="pdf-status muted">No PDF selected</span>
+        <button class="fbtn hidden" id="clearProductPdf" type="button">Clear</button>
+      </div>
+
+      <div class="group watermark-config" title="Optional watermark applied only to temporary upload copies">
+        <button class="btn ghost" id="openWatermark" type="button">Watermark settings</button>
+        <span id="watermarkStatus" class="watermark-status muted">Off</span>
+      </div>
+
+      <div class="group background-removal-config" title="Local rembg CPU processing applied only to temporary upload copies">
+        <button class="btn ghost" id="openBackgroundRemoval" type="button">Background removal</button>
+        <span id="backgroundRemovalStatus" class="background-removal-status muted">Off</span>
+      </div>
+
+      <div class="group ai-image-config" title="Enable or disable AI image regeneration for product primary photo">
+        <label class="switch-label btn ghost" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin:0;">
+          <input id="toggleImageAi" type="checkbox" /> ✨ AI Images
+        </label>
+        <span id="imageAiStatus" class="ai-image-status muted">Off</span>
+      </div>
+
+      <div class="group">
+        <select id="scrapeMode" class="inp" title="Which extractor to use">
+          <option value="traditional">Traditional IndiaMART</option>
+          <option value="whitelabel">White-label (custom URL site)</option>
+          <option value="auto">Auto-detect</option>
+        </select>
+        <input id="scrapeUrl" class="inp wide" placeholder="Listing / search URL" />
+        <input id="scrapeLimit" class="inp num" placeholder="limit" type="number" />
+        <button class="btn ghost" data-act="scrape">Extract list</button>
+      </div>
+
+      <div class="group">
+        <input
+          id="catalogUrl"
+          class="inp wide"
+          placeholder="Seller category page URL (bulk) — e.g. …/kyvex-global/pain-killer-medicines.html"
+        />
+        <input id="catalogLimit" class="inp" type="number" min="1" placeholder="limit" />
+        <button
+          class="btn ghost"
+          data-act="catalog"
+          title="Extract every product from a seller category page, then read each product page for its full specifications"
+        >⬇ Extract catalog (bulk)</button>
+        <button
+          class="btn ghost"
+          data-act="repairspecs"
+          title="Re-read the product page for every stored product that has no specifications, and queue the recovered ones for upload"
+        >🩹 Repair missing specs</button>
+      </div>
+
+      <div class="group">
+        <input id="singleUrl" class="inp wide" placeholder="Single product page URL (traditional IndiaMART)" />
+        <button class="btn ghost" data-act="single">＋ Extract single</button>
+      </div>
+
+      <div class="group">
+        <button class="btn stage" data-act="images">🖼 Images</button>
+        <button class="btn stage" data-act="seo">✍ SEO</button>
+        <input
+          id="uploadGroup"
+          class="inp"
+          placeholder="Product group (optional)"
+          title="Every product uploaded in this run is put into this IndiaMART product group. The group is created if your account does not have it yet."
+        />
+        <button class="btn stage" data-act="upload">⬆ Upload</button>
+        <button class="btn ghost" data-act="skiplive" title="Mark products already in your IndiaMART account as skipped">⏭ Skip live</button>
+        <button class="btn primary" data-act="runall">▶ Run all</button>
+      </div>
+    </section>
+
+    <main>
+      <section class="panel">
+        <div class="panel-head">
+          <div class="head-left">
+            <label class="selall"><input type="checkbox" id="selectAll" /> <span id="count" class="muted">Products</span></label>
+          </div>
+          <div class="filters" id="filters">
+            <button class="fbtn active" data-filter="all">All</button>
+            <button class="fbtn" data-filter="images">Need image</button>
+            <button class="fbtn" data-filter="seo">Need SEO</button>
+            <button class="fbtn" data-filter="uploaded">Need upload</button>
+          </div>
+        </div>
+        <div id="selbar" class="selbar hidden">
+          <span id="selCount">0 selected</span>
+          <div class="spacer"></div>
+          <button class="btn ghost" id="selClear">Clear</button>
+          <button class="btn danger" id="selDelete">🗑 Delete selected</button>
+        </div>
+        <div id="grid" class="grid"></div>
+        <div id="empty" class="empty hidden">No products yet — Import a JSON, Scrape a list, or Extract a single product URL above.</div>
+      </section>
+
+      <section class="panel logs">
+        <div class="panel-head">
+          <h2>Live log <span id="jobState" class="muted"></span></h2>
+          <button class="fbtn" id="clearLog">clear</button>
+        </div>
+        <div id="log" class="log"></div>
+      </section>
+    </main>
+
+    <!-- local upload background-removal settings modal -->
+    <div id="backgroundRemovalModal" class="modal hidden">
+      <div class="modal-card watermark-card">
+        <button class="close" id="backgroundRemovalClose" type="button" aria-label="Close">✕</button>
+        <div class="watermark-body">
+          <div class="watermark-heading">
+            <div>
+              <h2>Local upload background removal</h2>
+              <p class="muted">rembg CPU with the lightweight u2netp model. Only temporary preview/upload copies are processed; original and AI images are never modified.</p>
+            </div>
+            <label class="switch-label"><input id="bgEnabled" type="checkbox" /> Enable removal</label>
+          </div>
+
+          <div class="wm-grid">
+            <label>Apply to
+              <select id="bgApplyTo" class="inp">
+                <option value="all">All uploaded photos</option>
+                <option value="primary">Primary photo only</option>
+              </select>
+            </label>
+            <label>Model<input id="bgModel" class="inp" value="u2netp" disabled /></label>
+          </div>
+
+          <section class="wm-section">
+            <h3>Local engine status</h3>
+            <p id="bgEngineStatus" class="muted">Checking isolated Python environment…</p>
+            <p id="bgModelStatus" class="muted">Checking model cache…</p>
+            <p class="muted">CPU concurrency is fixed at 1 with 2 inference threads to keep this 8 GB laptop responsive. The worker stops after 60 seconds idle.</p>
+          </section>
+
+          <aside class="recommendation">
+            <h3>Review before upload</h3>
+            <p>Background removal is AI segmentation, not guaranteed watermark removal. Inspect the Upload preview for detached tablets, thin blister edges, transparent packaging, shadows, and any mark overlapping the product.</p>
+          </aside>
+
+          <div class="actions watermark-actions">
+            <button class="btn ghost" id="backgroundRemovalCancel" type="button">Cancel</button>
+            <button class="btn primary" id="saveBackgroundRemoval" type="button">Save settings</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- upload watermark settings modal -->
+    <div id="watermarkModal" class="modal hidden">
+      <div class="modal-card watermark-card">
+        <button class="close" id="watermarkClose" type="button" aria-label="Close">✕</button>
+        <div class="watermark-body">
+          <div class="watermark-heading">
+            <div>
+              <h2>Upload watermark settings</h2>
+              <p class="muted">Watermarks are applied only to temporary upload copies. Original and AI images are never modified.</p>
+            </div>
+            <label class="switch-label"><input id="wmEnabled" type="checkbox" /> Enable watermark</label>
+          </div>
+
+          <div class="wm-grid">
+            <label>Watermark type
+              <select id="wmMode" class="inp">
+                <option value="text">Text</option>
+                <option value="image">Image / logo</option>
+              </select>
+            </label>
+            <label>Apply to
+              <select id="wmApplyTo" class="inp">
+                <option value="all">All uploaded photos</option>
+                <option value="primary">Primary photo only</option>
+              </select>
+            </label>
+          </div>
+
+          <section id="wmTextSection" class="wm-section">
+            <h3>Text watermark</h3>
+            <label>Watermark text<input id="wmText" class="inp" maxlength="120" placeholder="Your business or brand name" /></label>
+            <div class="wm-grid wm-grid-3">
+              <label>Font
+                <select id="wmFontFamily" class="inp">
+                  <option>Arial</option><option>Verdana</option><option>Georgia</option>
+                  <option>Times New Roman</option><option>Courier New</option>
+                </select>
+              </label>
+              <label>Weight
+                <select id="wmFontWeight" class="inp">
+                  <option value="400">Regular</option><option value="500">Medium</option>
+                  <option value="600">Semi-bold</option><option value="700">Bold</option><option value="800">Extra bold</option>
+                </select>
+              </label>
+              <label>Text color<input id="wmTextColor" class="inp color-input" type="color" /></label>
+            </div>
+            <div class="wm-grid wm-grid-3">
+              <label>Text size (% of shorter side)<input id="wmTextSize" class="inp" type="number" min="1" max="20" step="0.5" /></label>
+              <label class="check-label"><input id="wmBackgroundEnabled" type="checkbox" /> Add text background</label>
+              <label>Background color<input id="wmBackgroundColor" class="inp color-input" type="color" /></label>
+              <label>Background opacity (%)<input id="wmBackgroundOpacity" class="inp" type="number" min="0" max="100" step="1" /></label>
+              <label>Background padding (%)<input id="wmBackgroundPadding" class="inp" type="number" min="0" max="10" step="0.5" /></label>
+            </div>
+          </section>
+
+          <section id="wmImageSection" class="wm-section hidden">
+            <h3>Image / logo watermark</h3>
+            <div class="group">
+              <input id="watermarkLogoFile" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" hidden />
+              <label class="btn ghost" for="watermarkLogoFile">Upload watermark image</label>
+              <span id="watermarkLogoStatus" class="muted">No image selected</span>
+              <button class="fbtn hidden" id="clearWatermarkLogo" type="button">Clear image</button>
+            </div>
+            <label>Image width (% of product image)<input id="wmImageWidth" class="inp" type="number" min="3" max="80" step="1" /></label>
+            <p class="muted">PNG with transparency is recommended for a clean logo watermark. Maximum file size: 5 MB.</p>
+          </section>
+
+          <details class="wm-section" open>
+            <summary>Advanced settings</summary>
+            <div class="wm-grid wm-grid-3 wm-advanced">
+              <label>Pattern
+                <select id="wmPattern" class="inp"><option value="single">Single</option><option value="tile">Tile across image</option></select>
+              </label>
+              <label>Position
+                <select id="wmPosition" class="inp">
+                  <option value="top-left">Top left</option><option value="top-center">Top center</option><option value="top-right">Top right</option>
+                  <option value="center-left">Center left</option><option value="center">Center</option><option value="center-right">Center right</option>
+                  <option value="bottom-left">Bottom left</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option>
+                </select>
+              </label>
+              <label>Opacity (%)<input id="wmOpacity" class="inp" type="number" min="5" max="100" step="1" /></label>
+              <label>Rotation (degrees)<input id="wmRotation" class="inp" type="number" min="-180" max="180" step="1" /></label>
+              <label>Edge margin (%)<input id="wmMargin" class="inp" type="number" min="0" max="20" step="0.5" /></label>
+              <label>Tile spacing (%)<input id="wmTileSpacing" class="inp" type="number" min="2" max="50" step="1" /></label>
+              <label>JPEG quality (%)<input id="wmQuality" class="inp" type="number" min="70" max="100" step="1" /></label>
+            </div>
+            <p class="muted">Position and edge margin apply to a single watermark. Tile spacing applies only to the tile pattern.</p>
+          </details>
+
+          <aside class="recommendation">
+            <h3>Recommended starting settings</h3>
+            <p>Use a single watermark at the bottom right with 25–35% opacity, 3% edge margin, 0° rotation, and 92% JPEG quality. Start text at 4% of the shorter image side or a logo at 18% of image width. Apply it to all photos for consistent branding. Test one product before starting a batch, and use only images and branding you are authorized to use.</p>
+            <button class="fbtn" id="wmRecommended" type="button">Use recommended values</button>
+          </aside>
+
+          <div class="actions watermark-actions">
+            <button class="btn ghost" id="watermarkCancel" type="button">Cancel</button>
+            <button class="btn primary" id="saveWatermark" type="button">Save settings</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- product detail / edit modal -->
+    <div id="modal" class="modal hidden">
+      <div class="modal-card">
+        <button class="close" id="modalClose">✕</button>
+        <div class="modal-body">
+          <div class="images">
+            <figure>
+              <figcaption>Original gallery <span id="originalCount" class="muted"></span></figcaption>
+              <div id="imgOriginalGallery" class="original-gallery"></div>
+            </figure>
+            <figure id="uploadPreviewFigure" class="hidden">
+              <figcaption>Upload preview <span id="uploadPreviewStatus" class="muted"></span></figcaption>
+              <div id="imgUploadPreviewGallery" class="original-gallery upload-preview-gallery"></div>
+            </figure>
+            <figure id="aiFigure">
+              <figcaption>AI copy</figcaption>
+              <img id="imgAi" alt="ai" />
+            </figure>
+          </div>
+          <div class="editor">
+            <label>Name<input id="edName" class="inp" /></label>
+            <div class="row2">
+              <label>Meta title<input id="edMetaTitle" class="inp" /></label>
+              <label>Keywords (comma)<input id="edKeywords" class="inp" /></label>
+            </div>
+            <label>Meta description<input id="edMetaDesc" class="inp" /></label>
+            <label>Description<textarea id="edDesc" rows="10"></textarea></label>
+            <label>Specs (JSON)<textarea id="edSpecs" rows="4"></textarea></label>
+            <div class="actions">
+              <button class="btn" id="btnSaveSeo">💾 Save</button>
+              <button class="btn ghost" data-reset="images">↻ Re-image</button>
+              <button class="btn ghost" data-reset="seo">↻ Re-SEO</button>
+              <button
+                class="btn ghost"
+                data-reset-only="uploaded"
+                title="Mark this product as not uploaded so it can be tried again. Does not start an upload and does not change anything on IndiaMART."
+              >↺ Reset upload status</button>
+              <button
+                class="btn stage"
+                id="btnReuploadDescription"
+                title="Update the description on the exact existing live IndiaMART product without re-uploading photos or PDF"
+              >↻ Re-upload Description</button>
+              <button
+                class="btn stage"
+                id="btnReuploadSpecs"
+                title="Update specifications on the exact existing live IndiaMART product without re-uploading photos or PDF"
+              >↻ Re-upload Specs</button>
+              <button class="btn primary" id="btnUploadOne">⬆ Upload this</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

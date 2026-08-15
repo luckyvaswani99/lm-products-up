@@ -1,0 +1,16 @@
+node_modules/
+.env
+.venv-background-removal/
+.DS_Store
+*.log
+
+# Logged-in Chromium profile — contains live IndiaMART session cookies.
+.session/
+
+# Local CodeGraph index.
+.codegraph/
+
+# Everything under data/ is this machine's own run state: scraped products,
+# downloaded and generated photos, the seller's brochure and local settings.
+data/*
+!data/.gitkeep
