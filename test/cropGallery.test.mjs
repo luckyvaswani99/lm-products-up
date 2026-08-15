@@ -105,3 +105,65 @@ test('the crop popup is confirmed only once every selected photo is in', async (
     );
   });
 });
+
+/**
+ * The crop/review popup reopens by itself after the rendered PDF page is
+ * confirmed, and its overlay swallows clicks underneath. On one machine it came
+ * back *after* Save and Continue (already handled); on another it came back
+ * *before*, and every product died with:
+ *
+ *   Could not click active Add Product Save and Continue; visible layers:
+ *   … im-crop-block: … Change Photo 12 More First Photo Upload Photos …
+ */
+test('a reopening image review popup is drained, not walked into', async (t) => {
+  const { Uploader } = await import('../src/uploader/indiamartUploader.js');
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  t.after(() => browser.close());
+  const drain = (stage) => Uploader.prototype._drainImageReview.call({ page }, stage);
+
+  /** `reopens` = how many times the popup comes back after being confirmed. */
+  const review = (reopens) =>
+    page.setContent(`
+      <div id="im-crop-block" class="is-visible-imcrp">
+        <div>Change Photo</div><div>12 More</div><div id="up">Upload Photos</div>
+      </div>
+      <script>
+        let left = ${reopens};
+        document.getElementById('up').addEventListener('click', () => {
+          const block = document.getElementById('im-crop-block');
+          block.classList.remove('is-visible-imcrp');
+          if (left-- > 0) setTimeout(() => block.classList.add('is-visible-imcrp'), 100);
+        });
+      </script>`);
+
+  await t.test('closes a popup that is already up', async () => {
+    await review(0);
+    await drain('before Save and Continue');
+    assert.equal(await page.locator('#im-crop-block.is-visible-imcrp').count(), 0);
+  });
+
+  await t.test('does nothing when no popup is open', async () => {
+    await page.setContent('<div id="im-crop-block">hidden</div>');
+    await drain('before Save and Continue');
+  });
+
+  await t.test('a popup that will not stay closed is reported, not ignored', async () => {
+    // A fresh page, because inline scripts only run on a page's first setContent.
+    const stubborn = await browser.newPage();
+    await stubborn.setContent(`
+      <div id="im-crop-block" class="is-visible-imcrp"><div id="up">Upload Photos</div></div>
+      <script>
+        document.getElementById('up').addEventListener('click', () => {
+          const block = document.getElementById('im-crop-block');
+          block.classList.remove('is-visible-imcrp');
+          setTimeout(() => block.classList.add('is-visible-imcrp'), 100);
+        });
+      </script>`);
+    await assert.rejects(
+      () => Uploader.prototype._drainImageReview.call({ page: stubborn }, 'before specifications'),
+      /kept reopening before specifications/,
+    );
+    await stubborn.close();
+  });
+});

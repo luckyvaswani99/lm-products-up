@@ -653,6 +653,15 @@ export class Uploader {
           await uploadPreview.click({ timeout: 10000 });
           await previewCrop.waitFor({ state: 'hidden', timeout: 20000 });
           log.info('  PDF preview crop confirmed without modifying the rendered page');
+
+          // Confirming it can bring the very same popup straight back. Settle
+          // that here rather than letting it surface seconds later as a
+          // blocked Save and Continue.
+          const reopened = await previewCrop
+            .waitFor({ state: 'visible', timeout: 3000 })
+            .then(() => true)
+            .catch(() => false);
+          if (reopened) await this._drainImageReview('after the PDF preview');
         }
       }
 
@@ -665,44 +674,18 @@ export class Uploader {
     }
   }
 
-  async _finish(product, { fillSpecifications = true } = {}) {
+  /**
+   * Confirm and close IndiaMART's crop/review popup for as long as it keeps
+   * coming back.
+   *
+   * Saving the rendered PDF page reopens this popup even though the very same
+   * preview was just confirmed, and its z-index overlay swallows every click
+   * underneath it. When that happens is a race: on one machine it reappeared
+   * after Save and Continue, on another before it, blocking the button with
+   * "visible layers: … im-crop-block: … 12 More … Upload Photos".
+   */
+  async _drainImageReview(stage) {
     const p = this.page;
-    const form = p.locator('#editProductPopup');
-    const saveContinue = form.locator('.MPSD_AdEditSVCon').filter({ hasText: 'Save and Continue' }).first();
-    try {
-      await saveContinue.waitFor({ state: 'visible', timeout: 10000 });
-      if ((await saveContinue.getAttribute('aria-disabled')) === 'true') {
-        throw new Error('IndiaMART has disabled Save and Continue');
-      }
-      await saveContinue.click({ timeout: 10000 });
-    } catch (cause) {
-      const visibleLayers = await p
-        .locator('[role="dialog"], [class*="modal"], [class*="overlay"], [class*="popup"]')
-        .evaluateAll((nodes) =>
-          nodes
-            .filter((node) => {
-              const box = node.getBoundingClientRect();
-              const style = getComputedStyle(node);
-              return box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-            })
-            .map((node) => `${node.id || node.className}: ${(node.innerText || '').trim().slice(0, 120)}`)
-            .slice(0, 5),
-        )
-        .catch(() => []);
-      throw new Error(
-        `Could not click active Add Product Save and Continue` +
-          `${visibleLayers.length ? `; visible layers: ${visibleLayers.join(' | ')}` : ''}`,
-        { cause },
-      );
-    }
-    // wait for the specification step
-    const finish = p.getByText(SEL.finish, { exact: true }).first();
-    await finish.waitFor({ timeout: 15000 });
-
-    // IndiaMART can reopen the crop/review popup after Save and Continue even
-    // when the same rendered PDF preview was already confirmed. Drain any
-    // visible review pass before touching specifications; otherwise its
-    // z-index overlay intercepts all radio-button clicks.
     const crop = p.locator('#im-crop-block.is-visible-imcrp');
     for (let pass = 0; pass < 3; pass += 1) {
       if (!(await crop.isVisible().catch(() => false))) break;
@@ -713,11 +696,63 @@ export class Uploader {
       await uploadPhotos.click({ timeout: 10000 });
       await crop.waitFor({ state: 'hidden', timeout: 20000 });
       await p.waitForTimeout(750);
-      log.info(`  confirmed reopened image review before specifications (pass ${pass + 1})`);
+      log.info(`  confirmed reopened image review ${stage} (pass ${pass + 1})`);
     }
     if (await crop.isVisible().catch(() => false)) {
-      throw new Error('IndiaMART image review popup kept reopening before specifications');
+      throw new Error(`IndiaMART image review popup kept reopening ${stage}`);
     }
+  }
+
+  async _finish(product, { fillSpecifications = true } = {}) {
+    const p = this.page;
+    const form = p.locator('#editProductPopup');
+    const crop = p.locator('#im-crop-block.is-visible-imcrp');
+    const saveContinue = form.locator('.MPSD_AdEditSVCon').filter({ hasText: 'Save and Continue' }).first();
+
+    // Clear the review popup first, and treat it as the one retryable reason a
+    // click can fail: it can also open *during* the attempt. Any other failure
+    // is reported straight away rather than retried blindly.
+    for (let attempt = 1; ; attempt += 1) {
+      await this._drainImageReview('before Save and Continue');
+      try {
+        await saveContinue.waitFor({ state: 'visible', timeout: 10000 });
+        if ((await saveContinue.getAttribute('aria-disabled')) === 'true') {
+          throw new Error('IndiaMART has disabled Save and Continue');
+        }
+        await saveContinue.click({ timeout: 10000 });
+        break;
+      } catch (cause) {
+        const blockedAgain = await crop.isVisible().catch(() => false);
+        if (blockedAgain && attempt < 3) {
+          log.warn(`  image review popup reopened over Save and Continue; clearing it (attempt ${attempt})`);
+          continue;
+        }
+        const visibleLayers = await p
+          .locator('[role="dialog"], [class*="modal"], [class*="overlay"], [class*="popup"]')
+          .evaluateAll((nodes) =>
+            nodes
+              .filter((node) => {
+                const box = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+              })
+              .map((node) => `${node.id || node.className}: ${(node.innerText || '').trim().slice(0, 120)}`)
+              .slice(0, 5),
+          )
+          .catch(() => []);
+        throw new Error(
+          `Could not click active Add Product Save and Continue` +
+            `${visibleLayers.length ? `; visible layers: ${visibleLayers.join(' | ')}` : ''}`,
+          { cause },
+        );
+      }
+    }
+
+    // wait for the specification step
+    const finish = p.getByText(SEL.finish, { exact: true }).first();
+    await finish.waitFor({ timeout: 15000 });
+
+    await this._drainImageReview('before specifications');
 
     let result = { missingRequired: [] };
     if (fillSpecifications) {
