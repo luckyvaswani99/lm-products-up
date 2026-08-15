@@ -75,3 +75,31 @@ test('IndiaMART’s photo rejection is read and named, not silently lost', async
     assert.ok(Date.now() - started < 5000, 'must not stall when there is nothing to report');
   });
 });
+
+/**
+ * IndiaMART can navigate the tab away from an open product form.
+ *
+ * Recorded live: the editor was filled and the PDF retained, then thirteen
+ * seconds later Save and Continue was gone because the page had moved to
+ * .../manageproducts/?opensuggprodview=redirectsellerrecom. The run reported
+ * 'Could not click active Add Product Save and Continue; visible layers:
+ * popup-toggle btn_cstmm: Help Videos' — which says nothing about the cause.
+ */
+test('the portal navigating away is told apart from a blocked button', async (t) => {
+  const { portalRedirected, PORTAL_REDIRECT } = await import('../src/uploader/indiamartUploader.js');
+
+  await t.test('recognises the recorded redirect, by url or by error', () => {
+    assert.ok(portalRedirected(
+      'https://seller.indiamart.com/product/manageproducts/?opensuggprodview=redirectsellerrecom',
+    ));
+    assert.ok(portalRedirected(new Error(`${PORTAL_REDIRECT}: the product form is gone, page is at …`)));
+  });
+
+  await t.test('an ordinary blocked button is not mistaken for it', () => {
+    assert.equal(portalRedirected('https://seller.indiamart.com/product/manageproducts/'), false);
+    assert.equal(
+      portalRedirected(new Error('Could not click active Add Product Save and Continue; visible layers: im-crop-block')),
+      false,
+    );
+  });
+});

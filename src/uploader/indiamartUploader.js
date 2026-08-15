@@ -206,6 +206,19 @@ function logPhotoRejections(rejected, itemLabel) {
   rejected.forEach((entry) => log.warn(`    ${entry.file || 'a photo'} — ${entry.reason}`));
 }
 
+/**
+ * IndiaMART can navigate the tab away from an open product form to its own
+ * recommendation view. Recorded on a real run: the editor was filled, the PDF
+ * retained, and thirteen seconds later Save and Continue was gone because the
+ * page had moved to "?opensuggprodview=redirectsellerrecom". That is the portal
+ * interrupting itself, not a fault in the product, so it is worth one retry.
+ */
+export const PORTAL_REDIRECT = 'IndiaMART navigated away from the product form';
+export function portalRedirected(urlOrError) {
+  const text = String(urlOrError?.message || urlOrError || '');
+  return text.includes('opensuggprodview') || text.includes(PORTAL_REDIRECT);
+}
+
 /** Close IndiaMART's "suggested products" / promo modals if one is open. */
 async function dismissPopups(page) {
   const closers = [
@@ -855,6 +868,13 @@ export class Uploader {
           log.warn(`  image review popup reopened over Save and Continue; clearing it (attempt ${attempt})`);
           continue;
         }
+        // IndiaMART sometimes navigates the whole tab to its own product
+        // recommendation view mid-edit ("?opensuggprodview=redirectsellerrecom"),
+        // taking the form with it. Nothing was wrong with the product, so say
+        // so distinctly and let the caller reopen the listing.
+        if (portalRedirected(p.url()) || !(await form.first().isVisible().catch(() => false))) {
+          throw new Error(`${PORTAL_REDIRECT}: the product form is gone, page is at ${p.url()}`);
+        }
         const visibleLayers = await p
           .locator('[role="dialog"], [class*="modal"], [class*="overlay"], [class*="popup"]')
           .evaluateAll((nodes) =>
@@ -1413,7 +1433,17 @@ export class Uploader {
       }
       log.warn(`  exact existing item ${existing.itemId} found — repairing it instead of adding a duplicate`);
       const namesBeforeRepair = await this._activeNamesById();
-      const repaired = await this._completeExistingProduct(product, existing, { before });
+      let repaired;
+      try {
+        repaired = await this._completeExistingProduct(product, existing, { before });
+      } catch (error) {
+        if (!portalRedirected(error)) throw error;
+        log.warn('  IndiaMART jumped to its recommendation view mid-edit; reopening this listing');
+        await this.gotoManage();
+        const reopened = await this._findActiveProduct(product);
+        if (!reopened || reopened.itemId !== existing.itemId) throw error;
+        repaired = await this._completeExistingProduct(product, reopened, { before });
+      }
       await this._assertOnlyTouched(namesBeforeRepair, existing.itemId);
       return repaired;
     }
