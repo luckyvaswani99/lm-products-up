@@ -219,6 +219,23 @@ export function portalRedirected(urlOrError) {
   return text.includes('opensuggprodview') || text.includes(PORTAL_REDIRECT);
 }
 
+/**
+ * Keep a Playwright wait alive without letting it crash the process.
+ *
+ * These waits are started BEFORE the action that triggers them, so if that
+ * action throws the wait is left with no one listening — and when it later
+ * times out Node kills the whole run on an unhandled rejection. A real run
+ * died exactly that way after publishing 31 listings:
+ *   page.waitForResponse: Timeout 30000ms exceeded while waiting for event
+ *   "response"  ->  triggerUncaughtException
+ * Awaiting the returned promise still rejects normally; this only stops an
+ * abandoned one from taking the process down.
+ */
+function detachable(promise) {
+  promise.catch(() => {});
+  return promise;
+}
+
 /** Close IndiaMART's "suggested products" / promo modals if one is open. */
 async function dismissPopups(page) {
   const closers = [
@@ -627,7 +644,7 @@ export class Uploader {
       const uploadButton = p.locator('.uploadbtndiv button').filter({ hasText: /upload photos from computer/i }).last();
       await uploadButton.waitFor({ state: 'visible', timeout: 5000 });
 
-      const chooserPromise = p.waitForEvent('filechooser', { timeout: 5000 });
+      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 5000 }));
       await uploadButton.click();
       const chooser = await chooserPromise;
       if (images.length > 1 && !chooser.isMultiple()) {
@@ -703,22 +720,22 @@ export class Uploader {
       // the visible card establishes the active product context, then its file
       // chooser starts both the document upload and PDF-to-image conversion.
       // Save and Continue must not run until both services acknowledge success.
-      const chooserPromise = p.waitForEvent('filechooser', { timeout: 5000 });
+      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 5000 }));
       await pdfCard.locator('.actionPDF').click({ timeout: 5000 });
       const chooser = await chooserPromise;
 
-      const uploadPromise = p.waitForResponse(
+      const uploadPromise = detachable(p.waitForResponse(
         (response) =>
           response.request().method() === 'POST' &&
           response.url().includes('uploading.imimg.com/uploadimage'),
         { timeout: 30000 },
-      );
-      const conversionPromise = p.waitForResponse(
+      ));
+      const conversionPromise = detachable(p.waitForResponse(
         (response) =>
           response.request().method() === 'POST' &&
           response.url().includes('pdf_to_image_service_new.php'),
         { timeout: 45000 },
-      );
+      ));
       await chooser.setFiles(pdfPath);
 
       const [uploadResponse, conversionResponse] = await Promise.all([uploadPromise, conversionPromise]);
@@ -762,12 +779,12 @@ export class Uploader {
         if (selectedPreviewCount < 1) {
           throw new Error('IndiaMART PDF preview dialog has no selected page to save');
         }
-        const previewUploadPromise = p.waitForResponse(
+        const previewUploadPromise = detachable(p.waitForResponse(
           (response) =>
             response.request().method() === 'POST' &&
             response.url().includes('uploading.imimg.com/uploadimage'),
           { timeout: 30000 },
-        );
+        ));
         await previewModal.locator('#save_btn_main_g02').click({ timeout: 5000 });
         const previewUpload = await previewUploadPromise;
         if (!previewUpload.ok()) {
@@ -1194,7 +1211,7 @@ export class Uploader {
         .filter({ hasText: /upload photos from computer/i })
         .last();
       await uploadButton.waitFor({ state: 'visible', timeout: 10000 });
-      const chooserPromise = this.page.waitForEvent('filechooser', { timeout: 10000 });
+      const chooserPromise = detachable(this.page.waitForEvent('filechooser', { timeout: 10000 }));
       await uploadButton.click();
       const chooser = await chooserPromise;
       if (prepared.length > 1 && !chooser.isMultiple()) {

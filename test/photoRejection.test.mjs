@@ -103,3 +103,44 @@ test('the portal navigating away is told apart from a blocked button', async (t)
     );
   });
 });
+
+/**
+ * A run must not be killed by a wait nobody is listening to any more.
+ *
+ * The PDF step starts waitForResponse/waitForEvent BEFORE the action that
+ * triggers them. When that action throws, those waits are abandoned — and their
+ * later timeout reaches Node as an unhandled rejection. A real run died that
+ * way after publishing 31 listings:
+ *
+ *   page.waitForResponse: Timeout 30000ms exceeded while waiting for event
+ *   "response"  ->  triggerUncaughtException(err, true) -> exit 1
+ */
+test('an abandoned wait cannot take the whole run down', async (t) => {
+  await t.test('a detached rejection does not reach the process', async () => {
+    const rejections = [];
+    const capture = (error) => rejections.push(error);
+    process.on('unhandledRejection', capture);
+    t.after(() => process.off('unhandledRejection', capture));
+
+    // What the uploader does: start the wait, then have the trigger throw.
+    const detachable = (promise) => { promise.catch(() => {}); return promise; };
+    const abandoned = detachable(
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 30000ms exceeded')), 10)),
+    );
+    try {
+      throw new Error('locator.click: Timeout 5000ms exceeded.');
+    } catch {
+      /* the product fails, and nothing ever awaits `abandoned` */
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(rejections, [], 'an abandoned wait must not surface as an unhandled rejection');
+    assert.ok(abandoned);
+  });
+
+  await t.test('a wait that IS awaited still reports its failure', async () => {
+    const detachable = (promise) => { promise.catch(() => {}); return promise; };
+    const waited = detachable(Promise.reject(new Error('Timeout 30000ms exceeded')));
+    await assert.rejects(() => waited, /Timeout 30000ms exceeded/);
+  });
+});
