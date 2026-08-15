@@ -61,3 +61,35 @@ test('strengths survive normalisation', () => {
   assert.match(listingKey('Vidalista 20 Mg Tadalafil Tablets'), /(^| )20mg( |$)/);
   assert.match(listingKey('2.5mg Tadarise Tadalafil Tablets'), /(^| )2\.5mg( |$)/);
 });
+
+/**
+ * The key that decides "would two of ours land on the same listing?".
+ *
+ * listingKey drops packaging nouns on purpose, which is right when asking
+ * whether the account already carries a product. It is wrong here: it collapsed
+ * "Dutaheal Dutasteride 0.5 mg Tablet" (₹350, 20x10 tablets) into
+ * "… 0.5 mg Capsules" (₹300, 30 capsules) and blocked both real products.
+ */
+test('the upload-name key keeps every word that names a product', async (t) => {
+  const { uploadNameKey } = await import('../src/listingKey.js');
+  const same = (a, b) => uploadNameKey(a) === uploadNameKey(b);
+
+  await t.test('word order alone is not a difference', () => {
+    assert.ok(same('0.1% Adakleen Adapalene Gel', 'Adakleen Adapalene Gel 0.1%'));
+    assert.ok(same('2% Minoxytop Minoxidil Topical Solution', 'Minoxytop 2% Minoxidil Topical Solution'));
+  });
+
+  await t.test('the dosage form is a difference', () => {
+    assert.ok(!same('Dutaheal Dutasteride 0.5 mg Tablet', 'Dutaheal Dutasteride 0.5 mg Capsules'));
+    assert.ok(!same('Novadart Dutasteride Softgel Capsules', 'Novadart Dutasteride Tablet'));
+  });
+
+  await t.test('strength and pack size stay distinct', () => {
+    assert.ok(!same('Minoxidil Tablet 5 mg', 'Minoxidil Tablet 10 mg'));
+    assert.ok(!same('Mupiheal 2% w/w Mupirocin Cream 30g', '2% Mupiheal Mupirocin Ointment'));
+  });
+
+  await t.test('plurals and "20 mg" spacing still normalise', () => {
+    assert.ok(same('Fincar Finasteride 5 mg Tablets', 'Fincar Finasteride 5mg Tablet'));
+  });
+});

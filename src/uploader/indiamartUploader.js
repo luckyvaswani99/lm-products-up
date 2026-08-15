@@ -374,11 +374,47 @@ export class Uploader {
   }
 
   async _openForm() {
-    // green "+ Add Product"
-    const byRole = this.page.getByRole('button', { name: /add product/i });
-    const byText = this.page.getByText(SEL.addProduct, { exact: true });
-    if (!(await tryClick(byRole)) && !(await tryClick(byText))) {
-      throw new Error('Could not find the "Add Product" button');
+    // The green "+ Add Product" sits at the top of Manage Products, while
+    // finding a listing scrolls through every lazily rendered row — on this
+    // account that is a document about 87,000 px tall. Measured after a scan:
+    // the button's box read y = -84430, so Playwright had to scroll ~84,000 px
+    // back before it could click. With the old 4s budget that only sometimes
+    // fit, which is how 33 products in a row failed with
+    // 'Could not find the "Add Product" button' as the account grew.
+    //
+    // Scroll back up first and wait for the button to be genuinely on screen.
+    // `getByRole('button')` is not tried at all: it is not a <button> and
+    // matched 0 elements on every check, so it only ever burned the budget.
+    const button = this.page.getByText(SEL.addProduct, { exact: true }).first();
+    let opened = false;
+    for (let attempt = 1; attempt <= 2 && !opened; attempt += 1) {
+      await this.page.evaluate(() => window.scrollTo(0, 0));
+      await this.page
+        .waitForFunction(
+          () => {
+            const node = [...document.querySelectorAll('span, div, a, button')].find(
+              (el) => (el.textContent || '').trim() === 'Add Product',
+            );
+            if (!node) return false;
+            const box = node.getBoundingClientRect();
+            return box.top >= 0 && box.bottom <= window.innerHeight;
+          },
+          null,
+          { timeout: 15000 },
+        )
+        .catch(() => {});
+      opened = await tryClick(button, 20000);
+      if (!opened) log.warn(`  "Add Product" did not accept a click (attempt ${attempt})`);
+    }
+    if (!opened) {
+      const shot = path.join(config.dataDir, 'add-product-button.png');
+      await this.page.screenshot({ path: shot }).catch(() => {});
+      const box = await button.boundingBox().catch(() => null);
+      throw new Error(
+        `Could not click the "Add Product" button ` +
+          `(found: ${await button.count().catch(() => 0)}, box: ${JSON.stringify(box)}). ` +
+          `Screenshot: ${shot}`,
+      );
     }
 
     try {

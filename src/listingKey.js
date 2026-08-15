@@ -55,6 +55,30 @@ export function listingKey(name) {
 }
 
 /**
+ * Identity of the name a product will actually be published under.
+ *
+ * Unlike listingKey this keeps every word, because here the question is "would
+ * these two of ours land on the same listing?" rather than "is this the same
+ * product the account already has". Dropping packaging nouns is wrong for that:
+ * "Dutaheal Dutasteride 0.5 mg Tablet" (₹350, 20x10 tablets) and "… 0.5 mg
+ * Capsules" (₹300, 30 capsules) are two products, and treating them as one
+ * blocked both. Only case, punctuation, plurals and "20 mg" spacing are
+ * normalised, so pure word-order duplicates are still caught.
+ */
+export function uploadNameKey(name) {
+  const tokens = String(name || '')
+    .toLowerCase()
+    .replace(/(\d)\s*(mg|mcg|ml|gm|g)\b/g, '$1$2')
+    .replace(/[^a-z0-9.]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => token.replace(/s$/, ''))
+    .filter(Boolean);
+
+  return [...new Set(tokens)].sort().join(' ');
+}
+
+/**
  * Active ingredients seen on this account's listings. Used only to recognise
  * that two names differ by which ingredient they quote — never to infer what a
  * product contains.

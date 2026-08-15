@@ -4,7 +4,7 @@ import { config } from './config.js';
 import { log } from './logger.js';
 import { Store, slugify } from './store.js';
 import { sanitizeSpecs } from './specSanitizer.js';
-import { isNearMatch, listingKey } from './listingKey.js';
+import { isNearMatch, listingKey, uploadNameKey } from './listingKey.js';
 import { scrape, scrapeSingle } from './scraper/indiamartScraper.js';
 import { readProductPages, scrapeCatalog } from './scraper/catalogScraper.js';
 import { downloadImages } from './images/downloader.js';
@@ -196,6 +196,13 @@ export async function runImport(file) {
  *    browser has been closed"
  * Every product attempted after that point failed the same way in milliseconds.
  */
+/**
+ * How many products may fail with the identical error before a run gives up.
+ * Past that it is the portal misbehaving, not the products: one run burned
+ * 65 minutes failing 33 listings on the same message.
+ */
+export const REPEATED_FAILURE_LIMIT = 4;
+
 export function browserSessionGone(error) {
   const message = String(error?.message || error || '');
   return (
@@ -344,16 +351,16 @@ export function uploadBlockers(product) {
 export function duplicateListingNames(products) {
   const byKey = new Map();
   for (const product of products) {
-    // Judge the name that is actually submitted, by token set.
+    // Judge the name that is actually submitted, word for word.
     //
     // Keying on the raw scraped name as well blocked genuinely different
     // products: two Mupiheal ointments (15 g and 30 g) share the scraped title
-    // "2% mupiheal Mupirocin Ointment" but upload as "Mupiheal 2% w/w Mupirocin
-    // Cream 30g" and "2% Mupiheal Mupirocin Ointment", and both sat
-    // unuploadable through ten retries. Token order is not a difference
+    // "2% mupiheal Mupirocin Ointment" but upload under different names, and
+    // both sat unuploadable through ten retries. Word order is not a difference
     // either — "0.1% Adakleen Adapalene Gel" and "Adakleen Adapalene Gel 0.1%"
-    // are one listing, and slugify alone would have let both through.
-    const key = listingKey(uploadProductName(product));
+    // are one listing. uploadNameKey keeps every word, so "… 0.5 mg Tablet"
+    // and "… 0.5 mg Capsules" stay two products.
+    const key = uploadNameKey(uploadProductName(product));
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, new Set());
     byKey.get(key).add(product);
@@ -473,6 +480,8 @@ export async function runUpload({
         if (!todo.length) return;
       }
       let aborted = null;
+      let lastReason = null;
+      let repeats = 0;
       for (const p of todo) {
         try {
           log.step(`  uploading: ${(p.seo?.name || p.name).slice(0, 55)}`);
@@ -520,6 +529,19 @@ export async function runUpload({
           store.markStage(p, 'uploaded', 'error', e);
           log.error(`  upload ✗ ${p.name.slice(0, 45)}: ${e.message}`);
           if (shot) log.warn(`    page at the moment of failure: ${shot}`);
+
+          // The same fault repeating is the portal, not the products. One run
+          // spent 65 minutes failing 33 products in a row on an identical
+          // error; stopping early keeps the rest retryable and puts the real
+          // cause at the end of the log where it can be seen.
+          const reason = String(e.message).split('\n')[0].slice(0, 80);
+          repeats = reason === lastReason ? repeats + 1 : 1;
+          lastReason = reason;
+          if (repeats >= REPEATED_FAILURE_LIMIT) {
+            aborted = new Error(`${repeats} products in a row failed with: ${reason}`);
+            await store.save();
+            break;
+          }
         }
         await store.save();
       }

@@ -115,3 +115,51 @@ test('a dead browser session is told apart from a product fault', async (t) => {
     }
   });
 });
+
+/**
+ * A run must not spend an hour repeating one fault.
+ *
+ * Recorded on a 42-product run: after four listings went live, the next 33
+ * failed one after another with the identical message 'Could not find the
+ * "Add Product" button' — 65 minutes of retrying a portal problem, with the
+ * real cause buried at the top of the log.
+ */
+test('a fault that repeats stops the run instead of consuming the queue', async (t) => {
+  const { REPEATED_FAILURE_LIMIT } = await import('../src/pipeline.js');
+
+  /** The loop's guard, applied to a sequence of per-product error messages. */
+  const attemptsBeforeStopping = (messages) => {
+    let lastReason = null;
+    let repeats = 0;
+    let attempted = 0;
+    for (const message of messages) {
+      attempted += 1;
+      const reason = String(message).split('\n')[0].slice(0, 80);
+      repeats = reason === lastReason ? repeats + 1 : 1;
+      lastReason = reason;
+      if (repeats >= REPEATED_FAILURE_LIMIT) break;
+    }
+    return attempted;
+  };
+
+  await t.test('the observed run of 33 identical failures stops early', () => {
+    const observed = Array(33).fill('Could not find the "Add Product" button');
+    assert.equal(attemptsBeforeStopping(observed), REPEATED_FAILURE_LIMIT);
+  });
+
+  await t.test('different faults do not add up to a stop', () => {
+    // Real mix from another run: each product broken for its own reason.
+    const mixed = [
+      'Could not find the "Add Product" button',
+      'PDF upload failed: page.waitForResponse: Timeout 30000ms exceeded',
+      'Could not find the "Add Product" button',
+      'page.goto: Timeout 30000ms exceeded.',
+      'Could not find the "Add Product" button',
+    ];
+    assert.equal(attemptsBeforeStopping(mixed), mixed.length);
+  });
+
+  await t.test('a lone failure never stops a run', () => {
+    assert.equal(attemptsBeforeStopping(['only this one broke']), 1);
+  });
+});
