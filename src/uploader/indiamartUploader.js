@@ -300,16 +300,29 @@ export class Uploader {
   }
 
   async gotoManage() {
-    await this.page.goto(config.indiamart.sellerUrl, { waitUntil: 'domcontentloaded' });
-    await dismissPopups(this.page);
-    try {
-      await this.page.locator('text=/Active\\s*\\(\\d+\\)/').first().waitFor({
-        state: 'visible',
-        timeout: 15000,
-      });
-    } catch (cause) {
-      throw new Error(`Manage Products did not become ready at ${this.page.url()}`, { cause });
+    // IndiaMART answers this URL with its own recommendation view now and then
+    // ("?opensuggprodview=redirectsellerrecom"), where no "Active (N)" tab
+    // exists — a run died on "Manage Products did not become ready at
+    // …?opensuggprodview=redirectsellerrecom". Asking again lands on the real
+    // page, so the upsell costs a reload rather than a product.
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await this.page.goto(config.indiamart.sellerUrl, { waitUntil: 'domcontentloaded' });
+      await dismissPopups(this.page);
+      try {
+        await this.page.locator('text=/Active\\s*\\(\\d+\\)/').first().waitFor({
+          state: 'visible',
+          timeout: 15000,
+        });
+        return;
+      } catch (cause) {
+        lastError = cause;
+        if (!portalRedirected(this.page.url()) || attempt === 3) break;
+        log.warn(`  IndiaMART served its recommendation view instead of Manage Products; reloading (attempt ${attempt})`);
+        await this.page.waitForTimeout(1500);
+      }
     }
+    throw new Error(`Manage Products did not become ready at ${this.page.url()}`, { cause: lastError });
   }
 
   async activeCount() {
