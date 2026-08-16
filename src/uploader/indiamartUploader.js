@@ -436,8 +436,21 @@ export class Uploader {
     // Scroll back up first and wait for the button to be genuinely on screen.
     // `getByRole('button')` is not tried at all: it is not a <button> and
     // matched 0 elements on every check, so it only ever burned the budget.
+    // Judge this by whether the form opened, never by whether the click call
+    // returned cleanly. Opening the form re-renders the page under Playwright,
+    // so a click that worked can still be reported as a timeout — which is how
+    // a product failed with 'Could not click the "Add Product" button' while
+    // the failure screenshot showed the Add Product form open on screen.
     const button = this.page.getByText(SEL.addProduct, { exact: true }).first();
-    let opened = false;
+    const formOpened = (timeout) =>
+      this.page
+        .locator('#editProductPopup:visible')
+        .first()
+        .waitFor({ state: 'visible', timeout })
+        .then(() => true)
+        .catch(() => false);
+
+    let opened = await formOpened(1000);
     for (let attempt = 1; attempt <= 2 && !opened; attempt += 1) {
       await this.page.evaluate(() => window.scrollTo(0, 0));
       await this.page
@@ -454,16 +467,22 @@ export class Uploader {
           { timeout: 15000 },
         )
         .catch(() => {});
-      opened = await tryClick(button, 20000);
-      if (!opened) log.warn(`  "Add Product" did not accept a click (attempt ${attempt})`);
+      const clicked = await tryClick(button, 20000);
+      opened = await formOpened(15000);
+      if (!opened) {
+        log.warn(
+          `  "Add Product" did not open the form (attempt ${attempt}; ` +
+            `the click itself ${clicked ? 'reported success' : 'reported a timeout'})`,
+        );
+      }
     }
     if (!opened) {
       const shot = path.join(config.dataDir, 'add-product-button.png');
       await this.page.screenshot({ path: shot }).catch(() => {});
       const box = await button.boundingBox().catch(() => null);
       throw new Error(
-        `Could not click the "Add Product" button ` +
-          `(found: ${await button.count().catch(() => 0)}, box: ${JSON.stringify(box)}). ` +
+        `"Add Product" did not open the product form ` +
+          `(button found: ${await button.count().catch(() => 0)}, box: ${JSON.stringify(box)}). ` +
           `Screenshot: ${shot}`,
       );
     }
