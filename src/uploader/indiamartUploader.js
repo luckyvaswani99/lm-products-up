@@ -317,9 +317,17 @@ export class Uploader {
         return;
       } catch (cause) {
         lastError = cause;
-        if (!portalRedirected(this.page.url()) || attempt === 3) break;
-        log.warn(`  IndiaMART served its recommendation view instead of Manage Products; reloading (attempt ${attempt})`);
-        await this.page.waitForTimeout(1500);
+        if (attempt === 3) break;
+        // Two separate causes, one answer: the upsell view, and a portal that
+        // has simply gone slow after a long run — "Manage Products did not
+        // become ready at …/manageproducts/" with no redirect in the URL. A
+        // reload costs seconds; failing here costs the product.
+        log.warn(
+          portalRedirected(this.page.url())
+            ? `  IndiaMART served its recommendation view instead of Manage Products; reloading (attempt ${attempt})`
+            : `  Manage Products did not render in time; reloading (attempt ${attempt})`,
+        );
+        await this.page.waitForTimeout(3000 * attempt);
       }
     }
     throw new Error(`Manage Products did not become ready at ${this.page.url()}`, { cause: lastError });
@@ -714,7 +722,25 @@ export class Uploader {
     }
   }
 
+  /**
+   * IndiaMART's document upload and PDF-to-image conversion are separate
+   * services, and under load either can miss its window — seen twice on the
+   * same product as "PDF upload failed: page.waitForResponse: Timeout 45000ms
+   * exceeded". The file and the form are unchanged when that happens, so the
+   * step is worth one clean retry before the product is called failed.
+   */
   async _uploadPdf() {
+    try {
+      return await this._uploadPdfOnce();
+    } catch (error) {
+      if (!/waitForResponse|Timeout \d+ms exceeded/i.test(error.message)) throw error;
+      log.warn(`  PDF step timed out against IndiaMART; retrying once (${error.message.split('\n')[0]})`);
+      await this.page.waitForTimeout(4000);
+      return this._uploadPdfOnce();
+    }
+  }
+
+  async _uploadPdfOnce() {
     const pdfPath = getSharedProductPdfPath();
     if (!pdfPath) {
       throw new Error('No shared product PDF selected. Choose one from the app toolbar before uploading.');
