@@ -120,6 +120,11 @@ function handleWorkerLine(line) {
     log.info(`  background-removal worker ready (${message.model}, CPU)`);
     return;
   }
+  if (message.type === 'fatal') {
+    const where = message.modelHome ? ` (model folder: ${message.modelHome})` : '';
+    rejectPending(new Error(`rembg CPU worker could not start: ${message.error}${where}`));
+    return;
+  }
   const request = pending.get(message.id);
   if (!request) return;
   pending.delete(message.id);
@@ -166,12 +171,25 @@ function startWorker(runtime) {
     if (worker === child) worker = null;
     rejectPending(new Error(`Could not start rembg CPU worker: ${error.message}`));
   });
-  child.once('exit', (code) => {
+  child.once('exit', () => {
     if (worker === child) worker = null;
-    if (pending.size) {
-      const detail = stderrBuffer.trim().split(/\r?\n/).slice(-3).join(' ');
-      rejectPending(new Error(`rembg CPU worker exited with code ${code}${detail ? `: ${detail}` : ''}`));
-    }
+  });
+  // 'close', not 'exit': exit can fire while stderr still has buffered data, so
+  // rejecting there threw away the Python traceback and left only "rembg CPU
+  // worker exited with code 1" with no reason at all.
+  child.once('close', (code) => {
+    if (worker === child) worker = null;
+    if (!pending.size) return;
+    const detail = stderrBuffer.trim().split(/\r?\n/).filter(Boolean).slice(-4).join(' ');
+    const hint =
+      !detail && !fs.existsSync(backgroundRemovalModelPath)
+        ? `. The ${BACKGROUND_REMOVAL_MODEL} model is not in ${backgroundRemovalModelDir} yet, ` +
+          'so the first run downloads it — check this machine can reach the network, ' +
+          `or copy ${BACKGROUND_REMOVAL_MODEL}.onnx into that folder`
+        : '';
+    rejectPending(
+      new Error(`rembg CPU worker exited with code ${code}${detail ? `: ${detail}` : ''}${hint}`),
+    );
   });
   return child;
 }

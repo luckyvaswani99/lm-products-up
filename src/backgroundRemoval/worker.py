@@ -19,11 +19,24 @@ from rembg import new_session, remove
 
 
 MODEL = os.environ.get("BACKGROUND_REMOVAL_MODEL", "u2netp")
-SESSION = new_session(MODEL)
 
 
 def respond(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+# Loading the model is the first thing that can fail, and on a fresh machine it
+# is also the step that downloads it. Report why in the worker's own words —
+# dying here left Node with nothing but "exited with code 1".
+try:
+    SESSION = new_session(MODEL)
+except Exception as error:  # noqa: BLE001 - the reason matters more than the type
+    respond({
+        "type": "fatal",
+        "error": f"could not load the {MODEL} model: {type(error).__name__}: {error}",
+        "modelHome": os.environ.get("U2NET_HOME", ""),
+    })
+    sys.exit(1)
 
 
 def post_process_alpha(rgba_bytes: bytes) -> bytes:
