@@ -23,6 +23,21 @@ def respond(payload: dict) -> None:
 # Imported after `respond` exists so a missing dependency can be reported
 # properly. rembg prints "No onnxruntime backend found." and leaves, which gave
 # Node an exit code and nothing else; SystemExit is caught for that reason.
+# onnxruntime is imported first and on its own. rembg catches its import error
+# and prints only generic advice — "No onnxruntime backend found. Please install
+# rembg with CPU or GPU support" — which stays identical whether the package is
+# missing, built for another architecture, or unable to load its DLLs. Reading
+# it directly is the only way to see which.
+try:
+    import onnxruntime
+except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters more than the type
+    respond({
+        "type": "fatal",
+        "error": f"onnxruntime could not be loaded: {type(error).__name__}: {error}",
+        "python": sys.executable,
+    })
+    sys.exit(1)
+
 try:
     import numpy as np
     import scipy.ndimage as ndimage
@@ -36,6 +51,7 @@ except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters mo
             f"{type(error).__name__}: {error or 'see requirements-background-removal.txt'}"
         ),
         "python": sys.executable,
+        "onnxruntime": getattr(onnxruntime, "__version__", "unknown"),
     })
     sys.exit(1)
 
