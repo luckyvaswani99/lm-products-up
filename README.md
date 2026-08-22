@@ -122,6 +122,30 @@ src/
 data/                        products.json, images/, ai-images/  (git-ignored)
 ```
 
+## Optional: local background removal
+
+Photos can have their background removed before upload (rembg CPU, u2netp). It
+is off until you switch it on in the app, and the rest of the pipeline works
+without it.
+
+```bash
+python -m venv .venv-background-removal
+.venv-background-removal/Scripts/python.exe -m pip install -r requirements-background-removal.txt
+```
+
+(On macOS/Linux the interpreter is `.venv-background-removal/bin/python`.)
+
+**Build the venv with Python 3.11, 3.12 or 3.13.** Verified on 3.11.15. On
+Python 3.14 the packages install and then onnxruntime fails to load, with rembg
+reporting only "No onnxruntime backend found" — the app now names the real
+cause and the interpreter version. Check yours with:
+
+```bash
+.venv-background-removal/Scripts/python.exe -u src/backgroundRemoval/worker.py
+```
+
+`{"type": "ready", …}` means it works; a `"fatal"` line says what is wrong.
+
 ## Notes & caveats
 
 - **Selectors drift.** IndiaMART changes its markup; if scraping or upload misses

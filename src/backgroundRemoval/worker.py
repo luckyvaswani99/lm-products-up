@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -20,14 +21,14 @@ def respond(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-# Imported after `respond` exists so a missing dependency can be reported
-# properly. rembg prints "No onnxruntime backend found." and leaves, which gave
-# Node an exit code and nothing else; SystemExit is caught for that reason.
-# onnxruntime is imported first and on its own. rembg catches its import error
-# and prints only generic advice — "No onnxruntime backend found. Please install
-# rembg with CPU or GPU support" — which stays identical whether the package is
-# missing, built for another architecture, or unable to load its DLLs. Reading
-# it directly is the only way to see which.
+# Imported after `respond` exists so a broken environment can be reported
+# instead of just killing the process; SystemExit is caught because rembg leaves
+# that way. onnxruntime goes first and alone: rembg swallows its import error
+# and prints the same generic advice — "No onnxruntime backend found. Please
+# install rembg with CPU or GPU support" — whether the package is missing, built
+# for another architecture, or unable to load its DLLs. Reading it directly is
+# the only way to tell which, and the Python version is reported with it because
+# a venv on an unsupported Python fails exactly here.
 try:
     import onnxruntime
 except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters more than the type
@@ -35,6 +36,7 @@ except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters mo
         "type": "fatal",
         "error": f"onnxruntime could not be loaded: {type(error).__name__}: {error}",
         "python": sys.executable,
+        "pythonVersion": platform.python_version(),
     })
     sys.exit(1)
 
@@ -51,6 +53,7 @@ except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters mo
             f"{type(error).__name__}: {error or 'see requirements-background-removal.txt'}"
         ),
         "python": sys.executable,
+        "pythonVersion": platform.python_version(),
         "onnxruntime": getattr(onnxruntime, "__version__", "unknown"),
     })
     sys.exit(1)

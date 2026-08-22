@@ -125,12 +125,22 @@ function handleWorkerLine(line) {
   }
   if (message.type === 'fatal') {
     const where = message.modelHome ? ` (model folder: ${message.modelHome})` : '';
-    const which = message.python ? ` (python: ${message.python})` : '';
+    // Name the interpreter AND its version: a venv built with an unsupported
+    // Python is the difference between onnxruntime loading and failing with
+    // "DLL load failed ... initialization routine failed" on a machine whose
+    // CPU and packages are both fine.
+    const version = message.pythonVersion ? ` ${message.pythonVersion}` : '';
+    const which = message.python ? ` (python${version}: ${message.python})` : '';
+    const supported =
+      message.pythonVersion && !/^3\.(11|12|13)\./.test(message.pythonVersion)
+        ? ` Background removal is verified on Python 3.11-3.13; this venv is on ${message.pythonVersion}.`
+        : '';
     // A broken environment does not fix itself between photos. Remember it, so
     // one clear reason is reported instead of the same failure once per image —
     // a run produced five identical "exited with code 1" lines in 45 seconds.
     startupFailure =
       `${message.error}${where}${which}. ` +
+      `${supported} ` +
       'Fix the environment, or turn Background Removal off in the app to upload without it.';
     rejectPending(new Error(`rembg CPU worker could not start: ${startupFailure}`));
     return;
