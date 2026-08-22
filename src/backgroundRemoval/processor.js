@@ -22,6 +22,9 @@ let stderrBuffer = '';
 let requestSequence = 0;
 let idleTimer = null;
 let renderQueue = Promise.resolve();
+// Set once the worker proves it cannot start at all, so every later photo is
+// refused with that reason instead of repeating the whole failed startup.
+let startupFailure = null;
 const pending = new Map();
 
 function localPythonCandidates() {
@@ -123,7 +126,13 @@ function handleWorkerLine(line) {
   if (message.type === 'fatal') {
     const where = message.modelHome ? ` (model folder: ${message.modelHome})` : '';
     const which = message.python ? ` (python: ${message.python})` : '';
-    rejectPending(new Error(`rembg CPU worker could not start: ${message.error}${where}${which}`));
+    // A broken environment does not fix itself between photos. Remember it, so
+    // one clear reason is reported instead of the same failure once per image —
+    // a run produced five identical "exited with code 1" lines in 45 seconds.
+    startupFailure =
+      `${message.error}${where}${which}. ` +
+      'Fix the environment, or turn Background Removal off in the app to upload without it.';
+    rejectPending(new Error(`rembg CPU worker could not start: ${startupFailure}`));
     return;
   }
   const request = pending.get(message.id);
@@ -197,6 +206,10 @@ function startWorker(runtime) {
 
 function requestRemoval(runtime, inputPath, outputPath) {
   return new Promise((resolve, reject) => {
+    if (startupFailure) {
+      reject(new Error(`background removal is unavailable: ${startupFailure}`));
+      return;
+    }
     clearTimeout(idleTimer);
     idleTimer = null;
     const child = startWorker(runtime);
