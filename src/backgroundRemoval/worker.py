@@ -12,17 +12,32 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
-import scipy.ndimage as ndimage
-from PIL import Image
-from rembg import new_session, remove
-
 
 MODEL = os.environ.get("BACKGROUND_REMOVAL_MODEL", "u2netp")
 
 
 def respond(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+# Imported after `respond` exists so a missing dependency can be reported
+# properly. rembg prints "No onnxruntime backend found." and leaves, which gave
+# Node an exit code and nothing else; SystemExit is caught for that reason.
+try:
+    import numpy as np
+    import scipy.ndimage as ndimage
+    from PIL import Image
+    from rembg import new_session, remove
+except (Exception, SystemExit) as error:  # noqa: BLE001 - the reason matters more than the type
+    respond({
+        "type": "fatal",
+        "error": (
+            f"background-removal dependencies are not installed correctly: "
+            f"{type(error).__name__}: {error or 'see requirements-background-removal.txt'}"
+        ),
+        "python": sys.executable,
+    })
+    sys.exit(1)
 
 
 # Loading the model is the first thing that can fail, and on a fresh machine it

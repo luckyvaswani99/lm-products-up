@@ -122,7 +122,8 @@ function handleWorkerLine(line) {
   }
   if (message.type === 'fatal') {
     const where = message.modelHome ? ` (model folder: ${message.modelHome})` : '';
-    rejectPending(new Error(`rembg CPU worker could not start: ${message.error}${where}`));
+    const which = message.python ? ` (python: ${message.python})` : '';
+    rejectPending(new Error(`rembg CPU worker could not start: ${message.error}${where}${which}`));
     return;
   }
   const request = pending.get(message.id);
