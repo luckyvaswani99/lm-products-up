@@ -146,6 +146,29 @@ cause and the interpreter version. Check yours with:
 
 `{"type": "ready", …}` means it works; a `"fatal"` line says what is wrong.
 
+**On Windows it also needs a current Visual C++ runtime.** onnxruntime 1.28 is
+built with the VS2022 toolchain; with the 2019 runtime still in place it
+installs cleanly and then fails to load:
+
+```
+onnxruntime could not be loaded: ImportError: DLL load failed while importing
+onnxruntime_pybind11_state: A dynamic link library (DLL) initialization routine failed.
+```
+
+Check the version — 14.4x or newer is fine, 14.2x is not:
+
+```powershell
+(Get-Item C:\Windows\System32\vcruntime140_1.dll).VersionInfo.FileVersion
+```
+
+```powershell
+winget install --id Microsoft.VCRedist.2015+.x64
+```
+
+Restart afterwards. Do not try an older onnxruntime instead: rembg 2.0.77
+requires numpy >= 2.3, and only recent onnxruntime builds work with it — and
+those are all VS2022 builds.
+
 ## Notes & caveats
 
 - **Selectors drift.** IndiaMART changes its markup; if scraping or upload misses
