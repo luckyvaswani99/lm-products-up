@@ -3,6 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { log } from '../logger.js';
 import { getSharedProductPdfPath } from '../sharedProductPdf.js';
+import { loadUploadSettings } from '../uploadSettings.js';
 import { getUploadImageRuntime, prepareUploadImage } from '../images/uploadImagePreparation.js';
 import { productImageFiles } from '../images/productImageFiles.js';
 import { openContext, isLoggedIn } from '../browser/session.js';
@@ -23,6 +24,11 @@ const SEL = {
   saveContinue: 'Save and Continue',
   finish: 'Finish',
 };
+
+/** The first line of an error, which is the part worth putting in a log. */
+function firstLine(error) {
+  return String(error?.message || error).split(/\r?\n/)[0];
+}
 
 async function tryClick(locator, timeout = 4000) {
   try {
@@ -927,7 +933,25 @@ export class Uploader {
       // the dialog covers Save and Continue and the PDF is not committed.
       const previewModal = p.locator('#savephotoModal_g02.show-modal');
       const previewStarted = Date.now();
+      const addBrochurePage = loadUploadSettings().brochurePageInGallery;
       if (await previewModal.isVisible().catch(() => false)) {
+        // The PDF is attached and verified above; this dialog only offers its
+        // rendered page as an extra gallery photo, and saving it costs about
+        // 17s a product. When that is not wanted the dialog still has to go —
+        // it covers Save and Continue — so it is closed instead of saved.
+        if (!addBrochurePage) {
+          await dismissModal(previewModal);
+          if (await previewModal.isVisible().catch(() => false)) {
+            throw new Error('IndiaMART PDF preview dialog would not close');
+          }
+          log.info('  PDF attached; its rendered page was not added to the gallery');
+          this.timings = this.timings || [];
+          this.timings.push({ label: 'PDF · dialog closed unsaved', seconds: (Date.now() - previewStarted) / 1000 });
+          log.info(
+            `  PDF uploaded and converted: ${attachedName} (${conversion.NO_OF_IMG_RENDERED} preview image(s))`,
+          );
+          return true;
+        }
 
         const selectedPreviewCount = Number(
           (await previewModal.locator('#no_of_selected_images').innerText().catch(() => '0')).trim(),
@@ -1505,18 +1529,31 @@ export class Uploader {
     }
   }
 
-  async _completeExistingProduct(product, live, { before = null } = {}) {
+  /**
+   * Bring one live listing up to date and prove it.
+   *
+   * `verifyOnly` runs the proving half alone. After Add Product has finished
+   * cleanly the repairing half is pure repetition — it reopens the editor and
+   * writes the description, basics and specifications a second time, ~11s a
+   * product — while the checks that actually establish the listing is right run
+   * either way. When a check does fail the caller repairs for real.
+   */
+  async _completeExistingProduct(product, live, { before = null, verifyOnly = false } = {}) {
     const itemId = live.itemId;
     const desiredPhotoCount = productImageFiles(product).length;
-    const media = await this._uploadMissingPhotos(product, live);
-    live = media.live;
+    let media = { live, refused: 0 };
 
-    const form = await this._openExactEditor(product, live);
-    await this._fillBasics(product);
-    const existingPdf = await this._pdfName(form);
-    if (!existingPdf) await this._uploadPdf();
-    else log.info(`  existing PDF retained: ${existingPdf}`);
-    await this._finish(product);
+    if (!verifyOnly) {
+      media = await this._uploadMissingPhotos(product, live);
+      live = media.live;
+
+      const form = await this._openExactEditor(product, live);
+      await this._fillBasics(product);
+      const existingPdf = await this._pdfName(form);
+      if (!existingPdf) await this._uploadPdf();
+      else log.info(`  existing PDF retained: ${existingPdf}`);
+      await this._finish(product);
+    }
 
     await this.gotoManage();
     const verified = await this._findActiveProduct(product);
@@ -1758,9 +1795,17 @@ export class Uploader {
             `product being created. Check that item on Manage Products; nothing else was changed.`,
         );
       }
-      const result = await this._timed('verify + complete', () =>
-        this._completeExistingProduct(product, live, { before }),
-      );
+      const result = await this._timed('verify + complete', async () => {
+        // Finish went through, so try proving the listing before rewriting it.
+        if (!finishError) {
+          try {
+            return await this._completeExistingProduct(product, live, { before, verifyOnly: true });
+          } catch (error) {
+            log.warn(`  verification found something to repair: ${firstLine(error)}`);
+          }
+        }
+        return this._completeExistingProduct(product, live, { before });
+      });
       await this._timed('collateral check', () => this._assertOnlyTouched(namedBefore, live.itemId, product));
       // Reached through Add Product on an item id that did not exist before, so
       // this is a newly created listing rather than a reconciled one.

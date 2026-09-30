@@ -167,6 +167,31 @@ function renderSeoAiSummary(seoAi = true) {
   }
 }
 
+/**
+ * The upload toggles, driven by what the server has saved. Their state used to
+ * live only in the page, so a refresh silently switched the duplicate lookup
+ * back on and the next run searched after being told not to.
+ */
+function renderUploadSettings(upload = {}) {
+  state.upload = { findDuplicates: upload.findDuplicates !== false, brochurePageInGallery: upload.brochurePageInGallery !== false };
+
+  const duplicates = $('#skipDuplicateBtn');
+  if (duplicates) {
+    const finding = state.upload.findDuplicates;
+    duplicates.setAttribute('aria-pressed', finding ? 'false' : 'true');
+    duplicates.textContent = finding ? '🔎 Find duplicates: on' : '⚡ Find duplicates: off';
+    duplicates.classList.toggle('ghost', finding);
+  }
+
+  const brochure = $('#brochurePageBtn');
+  if (brochure) {
+    const adding = state.upload.brochurePageInGallery;
+    brochure.setAttribute('aria-pressed', adding ? 'true' : 'false');
+    brochure.textContent = adding ? '📄 Brochure page: in gallery' : '⚡ Brochure page: PDF only';
+    brochure.classList.toggle('ghost', adding);
+  }
+}
+
 function renderChips(cfg) {
   const key = (name, on) => `<span class="chip ${on ? 'on' : 'off'}">${name} ${on ? '✓' : '✗'}</span>`;
   const backgroundRemovalEnabled = cfg.backgroundRemoval?.settings?.enabled === true;
@@ -190,6 +215,7 @@ function renderChips(cfg) {
   renderWatermarkSummary(cfg.watermark || {});
   renderImageAiSummary(imageAiEnabled);
   renderSeoAiSummary(seoAiEnabled);
+  renderUploadSettings(cfg.upload || {});
 }
 
 const badge = (s, label) =>
@@ -294,11 +320,9 @@ const ACTIONS = {
   single: () => api('POST', '/api/scrape-single', { url: $('#singleUrl').value.trim() }),
   images: () => api('POST', '/api/images', {}),
   seo: () => api('POST', '/api/seo', {}),
-  upload: () =>
-    api('POST', '/api/upload', {
-      group: $('#uploadGroup').value.trim(),
-      skipDuplicateCheck: $('#skipDuplicateBtn')?.getAttribute('aria-pressed') === 'true',
-    }),
+  // No toggle state is sent: the server holds it, so a stale page cannot make
+  // a run behave differently from what the toolbar shows.
+  upload: () => api('POST', '/api/upload', { group: $('#uploadGroup').value.trim() }),
   skiplive: () => api('POST', '/api/skip-live', {}),
   testseo: () => api('POST', '/api/test/seo', {}),
   testimage: () => api('POST', '/api/test/image', {}),
@@ -315,18 +339,31 @@ const STARTED = {
 };
 
 /**
- * Searching the account for an existing listing costs a few seconds per
- * product. Turning it off sends every product straight to Add Product; the
- * checks after Finish are unchanged, so nothing goes unverified.
+ * Both upload toggles are saved on the server, so the choice survives a refresh
+ * and a run always does what the toolbar says.
  */
-document.addEventListener('click', (e) => {
-  const toggle = e.target.closest('#skipDuplicateBtn');
+document.addEventListener('click', async (e) => {
+  const toggle = e.target.closest('#skipDuplicateBtn, #brochurePageBtn');
   if (!toggle) return;
-  const findingOff = toggle.getAttribute('aria-pressed') === 'true';
-  toggle.setAttribute('aria-pressed', findingOff ? 'false' : 'true');
-  toggle.textContent = findingOff ? '🔎 Find duplicates: on' : '⚡ Find duplicates: off';
-  toggle.classList.toggle('ghost', findingOff);
-  toast(findingOff ? 'Upload will look for an existing listing first' : 'Upload will add directly, without looking');
+  const isDuplicates = toggle.id === 'skipDuplicateBtn';
+  const next = isDuplicates
+    ? { findDuplicates: !state.upload?.findDuplicates }
+    : { brochurePageInGallery: !state.upload?.brochurePageInGallery };
+  try {
+    const result = await api('PUT', '/api/upload-settings', next);
+    renderUploadSettings(result.upload);
+    toast(
+      isDuplicates
+        ? result.upload.findDuplicates
+          ? 'Upload will look for an existing listing first'
+          : 'Upload will add directly, without looking'
+        : result.upload.brochurePageInGallery
+          ? 'The rendered PDF page will be added to each gallery'
+          : 'PDF stays attached; its page is no longer added to the gallery',
+    );
+  } catch (error) {
+    toast(error.message, 'err', 5000);
+  }
 });
 
 document.addEventListener('click', async (e) => {

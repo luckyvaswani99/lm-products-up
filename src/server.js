@@ -25,6 +25,7 @@ import {
 import { login, logout, openBrowser, isMarkedLoggedIn } from './browser/session.js';
 import { testSeo } from './ai/seoContent.js';
 import { loadSeoSettings, saveSeoSettings } from './ai/seoSettings.js';
+import { loadUploadSettings, saveUploadSettings } from './uploadSettings.js';
 import { testImage } from './images/aiImage.js';
 import {
   SHARED_PRODUCT_PDF_MAX_BYTES,
@@ -95,6 +96,7 @@ function publicConfig() {
     imageProvider: imageSettings.provider,
     imageAi: imageSettings.ai,
     seoAi: loadSeoSettings().ai,
+    upload: loadUploadSettings(),
     deepseekModel: config.deepseek.model,
     supplier: config.supplier,
     productPdf: getSharedProductPdfInfo(),
@@ -162,6 +164,26 @@ app.put('/api/image-settings', (req, res) => {
   }
 });
 
+app.get('/api/upload-settings', (_req, res) => {
+  try {
+    ok(res, { upload: loadUploadSettings() });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+app.put('/api/upload-settings', (req, res) => {
+  try {
+    if (job.name) throw new Error(`wait for "${job.name}" to finish before changing upload settings`);
+    const upload = saveUploadSettings(req.body || {});
+    log.ok(
+      `upload settings: duplicate lookup ${upload.findDuplicates ? 'on' : 'off'}, ` +
+        `brochure page in gallery ${upload.brochurePageInGallery ? 'on' : 'off'}`,
+    );
+    ok(res, { upload });
+  } catch (e) {
+    fail(res, e);
+  }
+});
 app.get('/api/seo-settings', (_req, res) => {
   try {
     ok(res, { seoSettings: loadSeoSettings() });

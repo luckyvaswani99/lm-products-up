@@ -13,6 +13,7 @@ import { generateSeo } from './ai/seoContent.js';
 import { loadSeoSettings } from './ai/seoSettings.js';
 import { Uploader, uploadProductName } from './uploader/indiamartUploader.js';
 import { productImageFiles } from './images/productImageFiles.js';
+import { loadUploadSettings } from './uploadSettings.js';
 
 async function withStore(fn) {
   const store = await new Store().load();
@@ -458,9 +459,12 @@ export async function runUpload({
   dryRun = false,
   ids,
   group = '',
-  skipDuplicateCheck = false,
+  skipDuplicateCheck: skipDuplicateOption,
   skipExisting: skipExistingOption = config.indiamart.skipExisting,
 } = {}) {
+  // The saved setting is what a run obeys; the request may still override it.
+  const skipDuplicateCheck =
+    typeof skipDuplicateOption === 'boolean' ? skipDuplicateOption : !loadUploadSettings().findDuplicates;
   let skipExisting = skipExistingOption;
   return withStore(async (store) => {
     // A product is uploadable as soon as it exists — the uploader falls back to

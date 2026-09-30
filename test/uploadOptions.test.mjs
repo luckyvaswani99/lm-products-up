@@ -63,30 +63,81 @@ test('the SEO stage publishes scraped text when AI copy is off', async (t) => {
   });
 });
 
-test('the duplicate lookup can be turned off for a run', async (t) => {
+/**
+ * The duplicate lookup can be turned off — and stay off.
+ *
+ * The toggle used to live only in the page, so a refresh put it back to "on"
+ * without a word and the next run searched the account after being told not
+ * to. The choice is saved on the server now, and the run reads it from there.
+ */
+test('the upload toggles are saved, not held in the page', async (t) => {
+  const { loadUploadSettings, saveUploadSettings } = await import('../src/uploadSettings.js');
+  const file = new URL('../data/upload-settings.json', import.meta.url);
+  const restore = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  t.after(() => {
+    if (restore === null) fs.rmSync(file, { force: true });
+    else fs.writeFileSync(file, restore);
+  });
+
+  await t.test('both are on until they are turned off', () => {
+    fs.rmSync(file, { force: true });
+    assert.deepEqual(loadUploadSettings(), { findDuplicates: true, brochurePageInGallery: true });
+  });
+
+  await t.test('a choice survives a restart', () => {
+    saveUploadSettings({ findDuplicates: false });
+    assert.equal(loadUploadSettings().findDuplicates, false);
+    assert.equal(loadUploadSettings().brochurePageInGallery, true, 'the other toggle is untouched');
+  });
+
+  await t.test('a damaged file falls back to on, never to silently skipping', () => {
+    fs.writeFileSync(file, '{ not json');
+    assert.deepEqual(loadUploadSettings(), { findDuplicates: true, brochurePageInGallery: true });
+  });
+});
+
+test('a run obeys the saved toggle', async (t) => {
   const pipeline = fs.readFileSync(new URL('../src/pipeline.js', import.meta.url), 'utf8');
   const uploader = fs.readFileSync(new URL('../src/uploader/indiamartUploader.js', import.meta.url), 'utf8');
   const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
-  await t.test('the option reaches the uploader', () => {
-    assert.match(pipeline, /skipDuplicateCheck = false/);
+  await t.test('the setting decides when the request says nothing', () => {
+    assert.match(pipeline, /!loadUploadSettings\(\)\.findDuplicates/);
     assert.match(pipeline, /addProduct\(p, \{ dryRun, skipDuplicateCheck \}\)/);
+  });
+
+  await t.test('the page sends no toggle state of its own', () => {
+    // A stale page must not be able to make a run behave differently from
+    // what the toolbar shows.
+    assert.doesNotMatch(app, /skipDuplicateCheck: \$\('#skipDuplicateBtn'\)/);
+    assert.match(app, /api\('PUT', '\/api\/upload-settings'/);
   });
 
   await t.test('it only skips the lookup, never the verification', () => {
     assert.match(uploader, /skipDuplicateCheck \? null : await this\._findActiveProduct\(product\)/);
-    // What proves the upload worked runs either way.
     const add = uploader.slice(uploader.indexOf('async addProduct('));
     assert.match(add, /_findActiveProduct\(product\)/, 'the result is still looked up after Finish');
     assert.match(add, /_assertOnlyTouched\(/, 'the collateral-rename check still runs');
   });
 
-  await t.test('the button sends its state with the upload', () => {
-    assert.match(app, /skipDuplicateCheck: \$\('#skipDuplicateBtn'\)\?\.getAttribute\('aria-pressed'\) === 'true'/);
-  });
-
   await t.test('the run says when the lookup was off', () => {
     assert.match(pipeline, /duplicate lookup off/);
+  });
+
+  await t.test('the PDF is attached either way; only its gallery page is optional', () => {
+    const pdf = uploader.slice(uploader.indexOf('async _uploadPdfOnce'));
+    assert.match(pdf, /loadUploadSettings\(\)\.brochurePageInGallery/);
+    // The attachment is verified before the dialog is even considered.
+    assert.ok(
+      pdf.indexOf('View PDF') < pdf.indexOf('brochurePageInGallery'),
+      'the PDF is confirmed attached before the gallery choice is made',
+    );
+  });
+
+  await t.test('a clean finish is verified rather than rewritten', () => {
+    assert.match(uploader, /verifyOnly = false/);
+    assert.match(uploader, /verifyOnly: true/);
+    assert.match(uploader, /verification found something to repair/);
   });
 });
 
