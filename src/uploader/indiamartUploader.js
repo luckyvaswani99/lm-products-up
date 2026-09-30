@@ -607,11 +607,20 @@ export class Uploader {
       await (await formField(form, 'priceOfProduct', SEL.price)).fill(String(product.price));
     if (product.unit) {
       const unitField = await formField(form, 'unitOfProduct', SEL.unit);
-      // On an existing listing IndiaMART locks the unit: the input renders
-      // `disabled`, and filling it just stalls until the 30s action timeout.
-      // Read what the listing already carries instead of hanging on it.
-      if (await unitField.isDisabled().catch(() => false)) {
+      // On an existing listing IndiaMART locks the unit, and asking whether it
+      // is disabled is not enough: one listing's input carried no `disabled`
+      // attribute at all and `fill` still spent its whole 30s on "element is
+      // not enabled". Try to type, and treat a refusal as locked.
+      const typed = await unitField
+        .fill(String(product.unit), { timeout: 5000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!typed) {
         const current = (await unitField.inputValue().catch(() => '')).trim();
+        // Locked means it cannot be changed from here at all, so failing the
+        // product over it only makes a listing that can never finish. Hold the
+        // listing to what it actually carries, and say so.
+        this.acceptedUnit = current || null;
         if (slugify(current) === slugify(String(product.unit))) {
           log.info(`  unit already set to "${current}" and locked by IndiaMART — left as is`);
         } else {
@@ -621,7 +630,6 @@ export class Uploader {
           );
         }
       } else {
-        await unitField.fill(String(product.unit));
         await p.waitForTimeout(500);
         // The current portal requires choosing a suggested unit; typing alone
         // leaves its internal unit value unset and Save and Continue does nothing.
