@@ -149,11 +149,30 @@ function renderSessionButton(signedIn) {
   button.classList.toggle('ghost', signedIn);
 }
 
+/**
+ * AI copy on: DeepSeek rewrites each listing. Off: the product's own scraped
+ * description and specification table are uploaded unchanged, and no text is
+ * generated or paid for.
+ */
+function renderSeoAiSummary(seoAi = true) {
+  state.seoAi = Boolean(seoAi);
+  const toggle = $('#toggleSeoAi');
+  const status = $('#seoAiStatus');
+  if (toggle) toggle.checked = state.seoAi;
+  if (status) {
+    status.textContent = state.seoAi ? 'On' : 'Off — scraped text';
+    status.title = state.seoAi
+      ? 'DeepSeek writes the listing name and description'
+      : 'The scraped description and specifications are uploaded exactly as they are';
+  }
+}
+
 function renderChips(cfg) {
   const key = (name, on) => `<span class="chip ${on ? 'on' : 'off'}">${name} ${on ? '✓' : '✗'}</span>`;
   const backgroundRemovalEnabled = cfg.backgroundRemoval?.settings?.enabled === true;
   const watermarkEnabled = cfg.watermark?.settings?.enabled === true;
   const imageAiEnabled = cfg.imageAi !== false;
+  const seoAiEnabled = cfg.seoAi !== false;
   $('#configChips').innerHTML =
     `<span class="chip">img: ${cfg.imageProvider}</span>` +
     `<span class="chip">seo: ${cfg.deepseekModel}</span>` +
@@ -163,12 +182,14 @@ function renderChips(cfg) {
     key('PDF', cfg.productPdf?.selected) +
     `<span class="chip ${backgroundRemovalEnabled ? 'on' : ''}">background: ${backgroundRemovalEnabled ? 'u2netp CPU' : 'off'}</span>` +
     `<span class="chip ${watermarkEnabled ? 'on' : ''}">watermark: ${watermarkEnabled ? cfg.watermark.settings.mode : 'off'}</span>` +
-    `<span class="chip ${imageAiEnabled ? 'on' : ''}">ai-images: ${imageAiEnabled ? 'on' : 'off'}</span>`;
+    `<span class="chip ${imageAiEnabled ? 'on' : ''}">ai-images: ${imageAiEnabled ? 'on' : 'off'}</span>` +
+    `<span class="chip ${seoAiEnabled ? 'on' : ''}">ai-copy: ${seoAiEnabled ? 'on' : 'scraped text'}</span>`;
   renderSessionButton(cfg.sessionExists === true);
   renderProductPdf(cfg.productPdf);
   renderBackgroundRemovalSummary(cfg.backgroundRemoval || {});
   renderWatermarkSummary(cfg.watermark || {});
   renderImageAiSummary(imageAiEnabled);
+  renderSeoAiSummary(seoAiEnabled);
 }
 
 const badge = (s, label) =>
@@ -272,12 +293,31 @@ const ACTIONS = {
   single: () => api('POST', '/api/scrape-single', { url: $('#singleUrl').value.trim() }),
   images: () => api('POST', '/api/images', {}),
   seo: () => api('POST', '/api/seo', {}),
-  upload: () => api('POST', '/api/upload', { group: $('#uploadGroup').value.trim() }),
+  upload: () =>
+    api('POST', '/api/upload', {
+      group: $('#uploadGroup').value.trim(),
+      skipDuplicateCheck: $('#skipDuplicateBtn')?.getAttribute('aria-pressed') === 'true',
+    }),
   skiplive: () => api('POST', '/api/skip-live', {}),
   testseo: () => api('POST', '/api/test/seo', {}),
   testimage: () => api('POST', '/api/test/image', {}),
   runall: () => api('POST', '/api/runall', {}),
 };
+
+/**
+ * Searching the account for an existing listing costs a few seconds per
+ * product. Turning it off sends every product straight to Add Product; the
+ * checks after Finish are unchanged, so nothing goes unverified.
+ */
+document.addEventListener('click', (e) => {
+  const toggle = e.target.closest('#skipDuplicateBtn');
+  if (!toggle) return;
+  const findingOff = toggle.getAttribute('aria-pressed') === 'true';
+  toggle.setAttribute('aria-pressed', findingOff ? 'false' : 'true');
+  toggle.textContent = findingOff ? '🔎 Find duplicates: on' : '⚡ Find duplicates: off';
+  toggle.classList.toggle('ghost', findingOff);
+  toast(findingOff ? 'Upload will look for an existing listing first' : 'Upload will add directly, without looking');
+});
 
 document.addEventListener('click', async (e) => {
   const actBtn = e.target.closest('[data-act]');
@@ -819,6 +859,22 @@ $('#clearWatermarkLogo').addEventListener('click', async () => {
     renderWatermarkSummary(result.watermark);
     toast('Watermark image cleared');
   } catch (error) {
+    toast(error.message, 'err', 5000);
+  }
+});
+
+$('#toggleSeoAi').addEventListener('change', async (event) => {
+  const enabled = event.currentTarget.checked;
+  try {
+    const result = await api('PUT', '/api/seo-settings', { ai: enabled });
+    renderSeoAiSummary(result.seoSettings.ai);
+    toast(
+      result.seoSettings.ai
+        ? 'AI listing copy enabled'
+        : 'AI copy off — uploads use the scraped description and specifications',
+    );
+  } catch (error) {
+    event.currentTarget.checked = !enabled;
     toast(error.message, 'err', 5000);
   }
 });

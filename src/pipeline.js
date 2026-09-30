@@ -10,6 +10,7 @@ import { readProductPages, scrapeCatalog } from './scraper/catalogScraper.js';
 import { downloadImages } from './images/downloader.js';
 import { regenerateImage } from './images/aiImage.js';
 import { generateSeo } from './ai/seoContent.js';
+import { loadSeoSettings } from './ai/seoSettings.js';
 import { Uploader, uploadProductName } from './uploader/indiamartUploader.js';
 import { productImageFiles } from './images/productImageFiles.js';
 
@@ -299,6 +300,30 @@ export async function runSeo({ limit, ids } = {}) {
     if (limit) todo = todo.slice(0, limit);
     log.step(`seo: ${todo.length} product(s)`);
     if (!todo.length) log.warn('  nothing to do — extract/scrape products first.');
+
+    // With AI copywriting off, the listing is published from what was scraped:
+    // the product's own description and its full specification table. Nothing
+    // is generated, so nothing is spent — and nothing is invented either.
+    if (!loadSeoSettings().ai) {
+      for (const p of todo) {
+        const specCount = Object.keys(p.specs || {}).length;
+        const characters = (p.description || '').trim().length;
+        store.markStage(p, 'seo', 'skipped');
+        if (!characters || !specCount) {
+          log.warn(
+            `  ${p.name.slice(0, 45)} — source has ${characters} description character(s) ` +
+              `and ${specCount} specification(s); upload will report what is missing`,
+          );
+        }
+      }
+      await store.save();
+      log.ok(
+        `AI copy is off — ${todo.length} product(s) will upload their own scraped ` +
+          'description and specifications unchanged',
+      );
+      return;
+    }
+
     const limiter = pLimit(config.concurrency);
     await Promise.all(
       todo.map((p) =>
@@ -433,6 +458,7 @@ export async function runUpload({
   dryRun = false,
   ids,
   group = '',
+  skipDuplicateCheck = false,
   skipExisting = config.indiamart.skipExisting,
 } = {}) {
   return withStore(async (store) => {
@@ -441,7 +467,10 @@ export async function runUpload({
     let todo = store.all().filter((p) => !['done', 'skipped'].includes(p.status.uploaded));
     if (ids?.length) todo = todo.filter((p) => ids.includes(p.id));
     if (limit) todo = todo.slice(0, limit);
-    log.step(`upload: ${todo.length} product(s)${dryRun ? ' (dry-run)' : ''}`);
+    log.step(
+      `upload: ${todo.length} product(s)${dryRun ? ' (dry-run)' : ''}` +
+        `${skipDuplicateCheck ? ' — duplicate lookup off' : ''}`,
+    );
     if (!todo.length) {
       log.warn('  nothing to upload — extract/scrape some products first (or they are all uploaded/skipped).');
       return;
@@ -485,7 +514,7 @@ export async function runUpload({
       for (const p of todo) {
         try {
           log.step(`  uploading: ${(p.seo?.name || p.name).slice(0, 55)}`);
-          const r = await up.addProduct(p, { dryRun });
+          const r = await up.addProduct(p, { dryRun, skipDuplicateCheck });
           if (dryRun) continue;
           if (r.ok) {
             store.markStage(p, 'uploaded', 'done');

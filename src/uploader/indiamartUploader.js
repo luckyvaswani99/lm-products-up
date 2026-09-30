@@ -81,23 +81,6 @@ export function uploadProductName(product) {
 }
 
 /**
- * Listings, other than the one being worked on, whose name changed between two
- * snapshots. Item ids that disappeared are ignored — a listing leaving the
- * Active tab is not a rename.
- */
-export function collateralRenames(namesBefore, namesAfter, allowedItemId) {
-  const renamed = [];
-  for (const [itemId, previousName] of namesBefore) {
-    if (itemId === allowedItemId) continue;
-    const currentName = namesAfter.get(itemId);
-    if (currentName !== undefined && currentName !== previousName) {
-      renamed.push(`item ${itemId}: "${previousName}" -> "${currentName}"`);
-    }
-  }
-  return renamed;
-}
-
-/**
  * Read the current state of IndiaMART's crop popup.
  *
  * Measured on the live portal (3 photos, Add Product): the popup renders one
@@ -1014,20 +997,72 @@ export class Uploader {
    * Matching is deliberately exact after the same normalization used during
    * upload so a specs repair can never open or create the wrong product.
    */
+  /**
+   * Ask Manage Products' own "Search Products" box, instead of scrolling.
+   *
+   * Measured on this account (501 Active listings): loading every lazily
+   * rendered row took ~25s per pass and left the page ~87,000 px tall, which is
+   * also what made the Add Product button unreachable. The box answers in a few
+   * seconds and leaves a short page behind.
+   *
+   * Behaviour recorded on the real portal: it needs typed keystrokes and Enter
+   * (a programmatic value set does nothing), matches case-insensitively on a
+   * full phrase or a single word — "Thalix Capsules" returned the 2 listings of
+   * that exact name, "Thalix" returned 3 — and returns nothing for a product
+   * the account does not carry. The "Active (N)" label never changes.
+   */
+  async _searchProducts(term) {
+    const input = this.page.locator('#searchProduct').first();
+    await input.waitFor({ state: 'visible', timeout: 15000 });
+    await input.click();
+    await input.fill('');
+    await input.pressSequentially(String(term), { delay: 25 });
+    await input.press('Enter');
+
+    // Settle rather than sleep: the list is rewritten once the search returns.
+    let previous = -1;
+    let stable = 0;
+    let rows = [];
+    for (let attempt = 0; attempt < 20 && stable < 2; attempt += 1) {
+      await this.page.waitForTimeout(1000);
+      rows = await this.page.locator('a.MPSD_prdname').evaluateAll((anchors) =>
+        anchors.map((anchor) => ({
+          anchorId: anchor.id || '',
+          itemId: (anchor.id || '').match(/^itemName(\d+)$/)?.[1] || '',
+          name: (anchor.innerText || anchor.textContent || '').trim(),
+        })),
+      );
+      stable = rows.length === previous ? stable + 1 : 0;
+      previous = rows.length;
+    }
+    return rows.filter((row) => row.itemId);
+  }
+
+  /** Item ids of the Active listings carrying exactly this name. */
+  async _itemIdsNamed(name) {
+    const wanted = slugify(name);
+    if (!wanted) return new Map();
+    const rows = await this._searchProducts(name);
+    return new Map(rows.filter((row) => slugify(row.name) === wanted).map((row) => [row.itemId, row.name]));
+  }
+
   async _findActiveProduct(product) {
-    await this._loadAllProductRows(await this.activeCount());
-    const candidates = new Set(
-      [uploadProductName(product), product.seo?.name, product.name]
-        .filter(Boolean)
-        .map((name) => slugify(name)),
-    );
-    const rows = await this.page.locator('a.MPSD_prdname').evaluateAll((anchors) =>
-      anchors.map((anchor) => ({
-        anchorId: anchor.id || '',
-        itemId: (anchor.id || '').match(/^itemName(\d+)$/)?.[1] || '',
-        name: (anchor.innerText || anchor.textContent || '').trim(),
-      })),
-    );
+    const candidateNames = [uploadProductName(product), product.seo?.name, product.name].filter(Boolean);
+    const candidates = new Set(candidateNames.map((name) => slugify(name)));
+
+    // Search each spelling this product could be live under and pool the hits;
+    // the exact-slug filter below still decides what counts as the same listing.
+    const rows = [];
+    const seen = new Set();
+    for (const name of [...new Set(candidateNames)]) {
+      // eslint-disable-next-line no-await-in-loop
+      for (const row of await this._searchProducts(name)) {
+        if (seen.has(row.itemId)) continue;
+        seen.add(row.itemId);
+        rows.push(row);
+      }
+    }
+
     const matches = rows.filter((row) => row.itemId && candidates.has(slugify(row.name)));
     if (matches.length > 1) {
       throw new Error(
@@ -1043,37 +1078,36 @@ export class Uploader {
     return { ...match, anchor, card };
   }
 
-  /** Name of every rendered Active listing, keyed by IndiaMART item id. */
-  async _activeNamesById() {
-    await this._loadAllProductRows(await this.activeCount());
-    const rows = await this.page.locator('a.MPSD_prdname').evaluateAll((anchors) =>
-      anchors
-        .map((anchor) => [
-          (anchor.id || '').match(/^itemName(\d+)$/)?.[1] || '',
-          (anchor.innerText || anchor.textContent || '').trim(),
-        ])
-        .filter(([itemId]) => itemId),
-    );
-    return new Map(rows);
+  /**
+   * Which listings already carry the name this run is about to write.
+   *
+   * The damage this guards against is specific and was seen for real: the form
+   * typed this product's name into a DIFFERENT listing's field, so that listing
+   * ended up carrying our name. Verifying our own listing by name cannot detect
+   * that — it matches the very value that was written — so the ids holding this
+   * name are recorded before the run and compared afterwards.
+   *
+   * This replaces a snapshot of every listing's name, which meant crawling all
+   * 501 Active rows twice per product. The uploader only ever types its own
+   * values, so a listing renamed to something else is not a failure it can
+   * produce; a listing renamed to OUR name is, and that is what this catches.
+   */
+  async _namedBefore(product) {
+    return this._itemIdsNamed(uploadProductName(product));
   }
 
-  /**
-   * Prove the run touched only its own listing.
-   *
-   * Verifying by name cannot detect collateral damage: if the form wrote over
-   * another listing, that listing now carries this product's name and matches
-   * the very value that was written. Comparing every listing's name against a
-   * snapshot taken beforehand is independent of which selector went wrong.
-   */
-  async _assertOnlyTouched(namesBefore, allowedItemId) {
+  async _assertOnlyTouched(idsBefore, allowedItemId, product) {
     await this.gotoManage();
-    const namesAfter = await this._activeNamesById();
-    const renamed = collateralRenames(namesBefore, namesAfter, allowedItemId);
-    if (renamed.length) {
+    const idsAfter = await this._itemIdsNamed(uploadProductName(product));
+    const stolen = [...idsAfter.keys()].filter(
+      (itemId) => itemId !== allowedItemId && !idsBefore.has(itemId),
+    );
+    if (stolen.length) {
       const shot = path.join(config.dataDir, 'collateral-rename.png');
       await this.page.screenshot({ path: shot, fullPage: false }).catch(() => {});
       throw new Error(
-        `This run renamed ${renamed.length} unrelated IndiaMART listing(s): ${renamed.join('; ')}. ` +
+        `This run put "${uploadProductName(product)}" onto ${stolen.length} unrelated ` +
+          `IndiaMART listing(s): ${stolen.map((id) => `item ${id}`).join(', ')}. ` +
           `Restore those names on Manage Products. Screenshot: ${shot}`,
       );
     }
@@ -1497,17 +1531,22 @@ export class Uploader {
    * listings are repaired in place; Add Product is used only when no exact
    * Active item exists.
    */
-  async addProduct(product, { dryRun = false } = {}) {
+  async addProduct(product, { dryRun = false, skipDuplicateCheck = false } = {}) {
     await this.gotoManage();
     const before = await this.activeCount();
-    const existing = await this._findActiveProduct(product);
+    // With the duplicate lookup skipped, nothing is reconciled: the product
+    // goes straight through Add Product. IndiaMART refuses a duplicate name
+    // itself, and the checks after Finish are unchanged, so a wrong result is
+    // still caught — it just is not avoided in advance.
+    const existing = skipDuplicateCheck ? null : await this._findActiveProduct(product);
+    if (skipDuplicateCheck) log.warn('  skipping the existing-listing lookup — adding directly');
     if (existing) {
       if (dryRun) {
         log.warn(`  dry-run: exact existing item ${existing.itemId} would be reconciled`);
         return { ok: false, before, after: before, dryRun: true, itemId: existing.itemId };
       }
       log.warn(`  exact existing item ${existing.itemId} found — repairing it instead of adding a duplicate`);
-      const namesBeforeRepair = await this._activeNamesById();
+      const namedBeforeRepair = await this._namedBefore(product);
       let repaired;
       try {
         repaired = await this._completeExistingProduct(product, existing, { before });
@@ -1519,15 +1558,15 @@ export class Uploader {
         if (!reopened || reopened.itemId !== existing.itemId) throw error;
         repaired = await this._completeExistingProduct(product, reopened, { before });
       }
-      await this._assertOnlyTouched(namesBeforeRepair, existing.itemId);
+      await this._assertOnlyTouched(namedBeforeRepair, existing.itemId, product);
       return repaired;
     }
 
-    // Snapshot every listing before touching the form. Adding a product must
-    // produce a NEW item id and must leave every other listing's name intact;
-    // anything else is an edit of somebody else's listing, never an upload.
-    const namesBefore = await this._activeNamesById();
-    const knownItemIds = new Set(namesBefore.keys());
+    // Record who already carries this name. Adding a product must produce a
+    // NEW item id under it; an id that held the name beforehand turning up as
+    // "the new listing" means an existing one was edited, never an upload.
+    const namedBefore = await this._namedBefore(product);
+    const knownItemIds = new Set(namedBefore.keys());
 
     await this._openForm();
     await this._fillBasics(product);
@@ -1565,7 +1604,7 @@ export class Uploader {
         );
       }
       const result = await this._completeExistingProduct(product, live, { before });
-      await this._assertOnlyTouched(namesBefore, live.itemId);
+      await this._assertOnlyTouched(namedBefore, live.itemId, product);
       // Reached through Add Product on an item id that did not exist before, so
       // this is a newly created listing rather than a reconciled one.
       return { ...result, repaired: false, created: true };

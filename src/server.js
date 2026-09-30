@@ -24,6 +24,7 @@ import {
 } from './pipeline.js';
 import { login, logout, isMarkedLoggedIn } from './browser/session.js';
 import { testSeo } from './ai/seoContent.js';
+import { loadSeoSettings, saveSeoSettings } from './ai/seoSettings.js';
 import { testImage } from './images/aiImage.js';
 import {
   SHARED_PRODUCT_PDF_MAX_BYTES,
@@ -93,6 +94,7 @@ function publicConfig() {
   return {
     imageProvider: imageSettings.provider,
     imageAi: imageSettings.ai,
+    seoAi: loadSeoSettings().ai,
     deepseekModel: config.deepseek.model,
     supplier: config.supplier,
     productPdf: getSharedProductPdfInfo(),
@@ -155,6 +157,28 @@ app.put('/api/image-settings', (req, res) => {
     const imageSettings = saveImageSettings(req.body || {});
     log.ok(`AI image generation ${imageSettings.ai ? 'enabled' : 'disabled'}.`);
     ok(res, { imageSettings });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+app.get('/api/seo-settings', (_req, res) => {
+  try {
+    ok(res, { seoSettings: loadSeoSettings() });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+app.put('/api/seo-settings', (req, res) => {
+  try {
+    if (job.name) throw new Error(`wait for "${job.name}" to finish before changing AI copy settings`);
+    const seoSettings = saveSeoSettings(req.body || {});
+    log.ok(
+      seoSettings.ai
+        ? 'AI listing copy enabled.'
+        : 'AI listing copy disabled — uploads use the scraped description and specifications.',
+    );
+    ok(res, { seoSettings });
   } catch (e) {
     fail(res, e);
   }

@@ -57,6 +57,13 @@
         <span id="imageAiStatus" class="ai-image-status muted">Off</span>
       </div>
 
+      <div class="group ai-image-config" title="Off: the scraped description and specifications are uploaded exactly as they are, and no AI text is paid for">
+        <label class="switch-label btn ghost" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin:0;">
+          <input id="toggleSeoAi" type="checkbox" /> ✍ AI Copy
+        </label>
+        <span id="seoAiStatus" class="ai-image-status muted">Off</span>
+      </div>
+
       <div class="group">
         <select id="scrapeMode" class="inp" title="Which extractor to use">
           <option value="traditional">Traditional IndiaMART</option>
@@ -102,6 +109,13 @@
           title="Every product uploaded in this run is put into this IndiaMART product group. The group is created if your account does not have it yet."
         />
         <button class="btn stage" data-act="upload">⬆ Upload</button>
+        <!-- Toggle, not an action: read by the upload request. -->
+        <button
+          class="btn ghost"
+          id="skipDuplicateBtn"
+          aria-pressed="false"
+          title="Upload goes straight to Add Product without first searching your account for an existing listing of the same name. Everything is still verified after Finish."
+        >🔎 Find duplicates: on</button>
         <button class="btn ghost" data-act="skiplive" title="Mark products already in your IndiaMART account as skipped">⏭ Skip live</button>
         <button class="btn primary" data-act="runall">▶ Run all</button>
       </div>

@@ -17,7 +17,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { Uploader, collateralRenames } from '../src/uploader/indiamartUploader.js';
+import { Uploader } from '../src/uploader/indiamartUploader.js';
 import { config } from '../src/config.js';
 
 /**
@@ -78,56 +78,84 @@ test('form fields never resolve to another listing', async (t) => {
   });
 });
 
-test('a run proves it renamed nothing else', async (t) => {
-  await t.test('reports every collateral rename with its item id', () => {
-    const before = new Map([
-      ['331627101', 'Testoboon Depot Injection'],
-      ['998877665', 'Some Other Live Product'],
-    ]);
-    const after = new Map([
-      ['331627101', 'Testoboon Depot Injection'],
-      ['998877665', 'Test E Injection'],
-    ]);
-
-    assert.deepEqual(collateralRenames(before, after, '331627101'), [
-      'item 998877665: "Some Other Live Product" -> "Test E Injection"',
-    ]);
-  });
-
-  await t.test('the listing being worked on may change name', () => {
-    const before = new Map([['331627101', 'Old Name']]);
-    const after = new Map([['331627101', 'New Name']]);
-    assert.deepEqual(collateralRenames(before, after, '331627101'), []);
-  });
-
-  await t.test('a listing leaving the Active tab is not a rename', () => {
-    const before = new Map([['331627101', 'Kept'], ['998877665', 'Deactivated Later']]);
-    const after = new Map([['331627101', 'Kept']]);
-    assert.deepEqual(collateralRenames(before, after, '331627101'), []);
-  });
-});
-
-test('active listing names are read with their item ids', async (t) => {
+/**
+ * Manage Products is searched, not scrolled.
+ *
+ * Recorded on the live account (501 Active listings): loading every lazily
+ * rendered row took ~25s per pass and left the page ~87,000 px tall. The
+ * portal's own "Search Products" box answers in seconds — but only to typed
+ * keystrokes followed by Enter, and it matches on substrings, so the exact-name
+ * filter still decides what counts as the same listing.
+ */
+test('listings are found through the portal search box', async (t) => {
   const browser = await chromium.launch();
   const page = await browser.newPage();
   const uploader = new Uploader();
   uploader.page = page;
   t.after(() => browser.close());
 
-  await page.setContent(`
-    <div>Active (2)</div>
-    <a class="MPSD_prdname" id="itemName331627101">Testoboon Depot Injection</a>
-    <a class="MPSD_prdname" id="itemName998877665">Test E Injection</a>
-    <a class="MPSD_prdname" id="notAnItem">Ignored</a>`);
+  /** The search box as the portal renders it, filtering on Enter. */
+  const managePage = async (listings) => {
+    await page.setContent(`
+      <div>Active (${listings.length})</div>
+      <input id="searchProduct" placeholder="Search Products" />
+      <div id="rows"></div>`);
+    await page.evaluate((all) => {
+      const render = (shown) => {
+        document.getElementById('rows').innerHTML = shown
+          .map((l) => `<a class="MPSD_prdname" id="itemName${l.id}">${l.name}</a>`)
+          .join('');
+      };
+      render(all.slice(0, 2)); // the portal shows a short default list
+      const box = document.getElementById('searchProduct');
+      box.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        const term = box.value.trim().toLowerCase();
+        render(term ? all.filter((l) => l.name.toLowerCase().includes(term)) : all.slice(0, 2));
+      });
+    }, listings);
+  };
 
-  const names = await uploader._activeNamesById();
-  assert.deepEqual(
-    [...names.entries()].sort(),
-    [
-      ['331627101', 'Testoboon Depot Injection'],
-      ['998877665', 'Test E Injection'],
-    ],
-  );
+  const CATALOGUE = [
+    { id: '332821858', name: 'Thalix Capsules' },
+    { id: '332821856', name: 'Thalix Capsules' },
+    { id: '330862807', name: '100mg Thalix Thalidomida Capsule' },
+    { id: '330862804', name: '100mg Thycad Thalidomide Capsule' },
+  ];
+
+  await t.test('a typed search returns only the matching rows', async () => {
+    await managePage(CATALOGUE);
+    const rows = await uploader._searchProducts('Thalix Capsules');
+    assert.deepEqual(rows.map((r) => r.itemId), ['332821858', '332821856']);
+  });
+
+  await t.test('a word matches more widely, as the portal does', async () => {
+    await managePage(CATALOGUE);
+    const rows = await uploader._searchProducts('Thalix');
+    assert.equal(rows.length, 3);
+  });
+
+  await t.test('only exact names count as the same listing', async () => {
+    await managePage(CATALOGUE);
+    const ids = await uploader._itemIdsNamed('100mg Thalix Thalidomida Capsule');
+    assert.deepEqual([...ids.keys()], ['330862807']);
+  });
+
+  await t.test('a product the account does not carry returns nothing', async () => {
+    await managePage(CATALOGUE);
+    assert.equal((await uploader._searchProducts('Accuret')).length, 0);
+    assert.equal((await uploader._itemIdsNamed('Accuret')).size, 0);
+  });
+
+  await t.test('two listings of one name are both reported, never picked between', async () => {
+    await managePage(CATALOGUE);
+    const ids = await uploader._itemIdsNamed('Thalix Capsules');
+    assert.deepEqual([...ids.keys()].sort(), ['332821856', '332821858']);
+    await assert.rejects(
+      () => uploader._findActiveProduct({ name: 'Thalix Capsules' }),
+      /multiple exact live products/i,
+    );
+  });
 });
 
 /**
