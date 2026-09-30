@@ -235,13 +235,24 @@ export async function scrapeCatalog(urls, { limit = 0, detail = true, headful = 
   // visible immediately instead of surfacing later as a bad listing.
   const withSpecs = results.filter((record) => Object.keys(record.specs).length).length;
   const withPhotos = results.filter((record) => record.imageUrls.length).length;
+  // Counted because it went unnoticed: a whole catalogue of 40 products
+  // extracted with an empty description, and the summary — which reported
+  // specifications and photos — gave no sign of it.
+  const withDescription = results.filter((record) => (record.description || '').trim().length).length;
   const singlePhoto = results.filter((record) => record.imageUrls.length === 1);
   const totalPhotos = results.reduce((sum, record) => sum + record.imageUrls.length, 0);
 
   log.ok(
     `catalog complete: ${results.length} product(s) — ` +
-      `${withSpecs} with specifications, ${withPhotos} with photos, ${totalPhotos} photos total`,
+      `${withSpecs} with specifications, ${withDescription} with a description, ` +
+      `${withPhotos} with photos, ${totalPhotos} photos total`,
   );
+  if (withDescription < results.length) {
+    log.warn(
+      `  ${results.length - withDescription} product(s) have no description. With AI copy off ` +
+        'they cannot be uploaded, and the source page may name that block differently.',
+    );
+  }
   const incomplete = results.filter((record) => !Object.keys(record.specs).length || !record.imageUrls.length);
   if (incomplete.length) {
     log.warn(`  ${incomplete.length} product(s) are incomplete and will not be uploaded:`);

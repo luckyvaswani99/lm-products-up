@@ -119,8 +119,24 @@ export async function extractDetail(page, url, { navigate = true } = {}) {
 
       const name = firstText(['h1', '.bo.center-heading', '.prod-name', '[itemprop="name"]']);
 
+      // The description block is not named consistently across sellers.
+      // Measured on silverlinemedicare/anti-depressants: every one of its 40
+      // products carries 1,000+ characters under #descp2 / .pro-descN, and none
+      // of the ids listed before it exist there at all — so all 40 extracted
+      // with an empty description. The list is ordered, so a page that has an
+      // older container still uses that one.
       const description = firstText(
-        ['#prod-desc', '.prod-descp', '#descp', '.dtl_desc', '.pd_descBox', '[itemprop="description"]', '#descriptionId'],
+        [
+          '#prod-desc',
+          '.prod-descp',
+          '#descp',
+          '#descp2',
+          '.pro-descN',
+          '.dtl_desc',
+          '.pd_descBox',
+          '[itemprop="description"]',
+          '#descriptionId',
+        ],
         30,
       );
 
