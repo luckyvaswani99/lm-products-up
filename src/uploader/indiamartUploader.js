@@ -219,6 +219,28 @@ function detachable(promise) {
   return promise;
 }
 
+/**
+ * Close one IndiaMART dialog, judged by whether it actually went away.
+ *
+ * Its own close control is tried first, then Escape. Nothing here assumes a
+ * particular markup: the caller checks the dialog afterwards, so a control that
+ * does nothing is simply a control that did nothing.
+ */
+async function dismissModal(modal) {
+  const closers = [
+    modal.locator('[class*="close" i], [aria-label="Close" i]').first(),
+    modal.getByText('×', { exact: true }).first(),
+  ];
+  for (const closer of closers) {
+    if (!(await closer.isVisible().catch(() => false))) continue;
+    await closer.click({ timeout: 3000 }).catch(() => {});
+    if (!(await modal.isVisible().catch(() => false))) return true;
+  }
+  await modal.page().keyboard.press('Escape').catch(() => {});
+  await modal.page().waitForTimeout(500);
+  return !(await modal.isVisible().catch(() => false));
+}
+
 /** Close IndiaMART's "suggested products" / promo modals if one is open. */
 async function dismissPopups(page) {
   const closers = [
@@ -737,6 +759,16 @@ export class Uploader {
     } catch (error) {
       if (!/waitForResponse|Timeout \d+ms exceeded/i.test(error.message)) throw error;
       log.warn(`  PDF step timed out against IndiaMART; retrying once (${error.message.split('\n')[0]})`);
+      // Whatever the failed attempt left on screen is still covering the PDF
+      // card, and a retry that walks into it only fails on an intercepted
+      // click — which is how one product reported a 5s timeout on a control
+      // that was never the problem.
+      const leftOver = this.page.locator('#savephotoModal_g02.show-modal');
+      if (await leftOver.isVisible().catch(() => false)) {
+        await dismissModal(leftOver);
+        log.warn('  cleared the dialog the failed attempt left open');
+      }
+      await this._drainImageReview('before retrying the PDF').catch(() => {});
       await this.page.waitForTimeout(4000);
       return this._uploadPdfOnce();
     }
@@ -831,7 +863,23 @@ export class Uploader {
         if (!previewUpload.ok()) {
           throw new Error(`IndiaMART PDF preview upload returned HTTP ${previewUpload.status()}`);
         }
-        await previewModal.waitFor({ state: 'hidden', timeout: 20000 });
+        // The PDF itself is already attached and verified above; this dialog
+        // only offers the rendered page as an extra gallery photo. Observed on
+        // a single-photo product: the save went through — the upload responded
+        // 200 — and the dialog simply stayed on screen, covering the PDF card
+        // so a retry could not even reach it ("#savephotoModal_g02 … intercepts
+        // pointer events"). Close it rather than failing the product over it.
+        const closed = await previewModal
+          .waitFor({ state: 'hidden', timeout: 15000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!closed) {
+          await dismissModal(previewModal);
+          if (await previewModal.isVisible().catch(() => false)) {
+            throw new Error('IndiaMART PDF preview dialog stayed open and would not close');
+          }
+          log.warn('  PDF preview dialog did not close itself after saving; dismissed it');
+        }
         log.info(`  PDF preview confirmed: ${selectedPreviewCount} page(s)`);
 
         // Saving the selected PDF page opens IndiaMART's image crop/review

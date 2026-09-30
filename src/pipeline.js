@@ -459,14 +459,24 @@ export async function runUpload({
   ids,
   group = '',
   skipDuplicateCheck = false,
-  skipExisting = config.indiamart.skipExisting,
+  skipExisting: skipExistingOption = config.indiamart.skipExisting,
 } = {}) {
+  let skipExisting = skipExistingOption;
   return withStore(async (store) => {
     // A product is uploadable as soon as it exists — the uploader falls back to
     // the raw scraped name/description/specs/image when AI stages haven't run.
     let todo = store.all().filter((p) => !['done', 'skipped'].includes(p.status.uploaded));
     if (ids?.length) todo = todo.filter((p) => ids.includes(p.id));
     if (limit) todo = todo.slice(0, limit);
+    // "Find duplicates: off" means exactly that, so it also turns off the
+    // SKIP_EXISTING pre-scan. That scan is a second, separate way of looking
+    // for duplicates — it crawls every Active and Inactive listing before the
+    // first product — and leaving it on made the button look like it did
+    // nothing at all.
+    if (skipDuplicateCheck && skipExisting) {
+      log.warn('  duplicate lookup is off, so the account pre-scan (SKIP_EXISTING) is skipped too');
+      skipExisting = false;
+    }
     log.step(
       `upload: ${todo.length} product(s)${dryRun ? ' (dry-run)' : ''}` +
         `${skipDuplicateCheck ? ' — duplicate lookup off' : ''}`,

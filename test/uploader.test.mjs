@@ -212,3 +212,84 @@ test('a value the row spells in another unit is still set, never rounded', async
     assert.deepEqual(result.unrepresentable.map((f) => f.group), ['Shelf Life']);
   });
 });
+
+/**
+ * A product went live with every one of its seven specifications empty, while
+ * the same run's log listed those rows and the options they offered. The rows
+ * were on the page; the locator could not reach them.
+ *
+ * Markup recorded from the live specification step:
+ *
+ *   <div class="SLC_dflx">                                  <- the row
+ *     <div><span title="Strength">Strength</span></div>     <- label column
+ *     <div class="MPSD_SPADpopw1"><ul><li>
+ *       <label><input type="radio" readonly value="7.5 mg">  <- options column
+ *
+ * The label's parent is the label column, which holds no inputs at all, so a
+ * `parent::div[.//input]` step matched nothing.
+ */
+test('a spec row is found when its label sits beside the options', async (t) => {
+  const { chromium } = await import('playwright');
+  const { fillSpecs } = await import('../src/uploader/specFiller.js');
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  t.after(() => browser.close());
+
+  /** The row exactly as the portal builds it: label and options are siblings. */
+  const row = (label, values) => `
+    <div class="SLC_dflx">
+      <div class="SLC_f13 MPSD_SPADpopw"><span class="MPSD_SPADpopqtxt" title="${label}">${label}</span></div>
+      <div class="MPSD_SPADpopw1"><ul>${values
+        .map(
+          (v) => `<li><label class="MPSD_SPADpop_radio">
+            <input type="radio" name="input_4339168" readonly value="${v}">
+            <span class="MPSD_SPADpop_radiolbltxt">${v}</span></label></li>`,
+        )
+        .join('')}</ul></div>
+    </div>`;
+
+  await t.test('the value is ticked, not skipped', async () => {
+    await page.setContent(row('Strength', ['7.5 mg', '10 mg', '20 mg']));
+    const result = await fillSpecs(page, { specs: { Strength: '10 mg' } });
+
+    assert.equal(await page.locator('input[value="10 mg"]').isChecked(), true);
+    assert.ok(result.done.includes('Strength=10 mg'));
+  });
+
+  await t.test('the older layout, where the label is the parent, still works', async () => {
+    await page.setContent(`
+      <div><span>Strength</span>
+        <label><input type="radio" value="10 mg">10 mg</label>
+      </div>`);
+    const result = await fillSpecs(page, { specs: { Strength: '10 mg' } });
+    assert.ok(result.done.includes('Strength=10 mg'));
+  });
+
+  await t.test('a label that differs only in case still matches', async () => {
+    // The source writes "Shelf life"; the form renders "Shelf Life". That one
+    // capital dropped the value entirely.
+    await page.setContent(row('Shelf Life', ['24 months', '36 months']));
+    const result = await fillSpecs(page, { specs: { 'Shelf life': '2 years' } });
+    assert.ok(
+      result.done.includes('Shelf life=24 months'),
+      `expected 2 years to resolve to the row's own 24 months, got ${JSON.stringify(result.done)}`,
+    );
+  });
+
+  await t.test('a value with no row at all is named, never dropped in silence', async () => {
+    await page.setContent(row('Strength', ['10 mg']));
+    const result = await fillSpecs(page, {
+      specs: { Strength: '10 mg', Manufacturer: 'HAB Pharma', 'Country of Origin': 'Made in India' },
+    });
+
+    assert.ok(result.done.includes('Strength=10 mg'));
+    assert.deepEqual(result.noSuchRow.sort(), ['Country of Origin=Made in India', 'Manufacturer=HAB Pharma']);
+  });
+
+  await t.test('an alias that found no row is not reported as a lost value', async () => {
+    // "Strength" is also planned as "Dose"; only one of them can match.
+    await page.setContent(row('Strength', ['10 mg']));
+    const result = await fillSpecs(page, { specs: { Strength: '10 mg' } });
+    assert.deepEqual(result.noSuchRow, []);
+  });
+});

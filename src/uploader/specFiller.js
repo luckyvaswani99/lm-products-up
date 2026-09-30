@@ -137,10 +137,34 @@ export function deriveSpecPlan(product) {
 }
 
 // --- locators anchored to each visible spec row ---
+/**
+ * The row that carries both a label and its options.
+ *
+ * `parent::div` was too strict for the form IndiaMART renders now. Recorded
+ * from a live specification step:
+ *
+ *   <div class="SLC_dflx">                       <- the row
+ *     <div><span title="Strength">Strength</span></div>   <- label column
+ *     <div class="MPSD_SPADpopw1"><ul><li><label><input …>  <- options column
+ *
+ * The label's parent is the label column, which holds no inputs at all, so the
+ * old xpath matched nothing and every field was skipped in silence — a product
+ * went live with all seven of its specifications empty while the log listed
+ * those same rows and their options. `ancestor::` finds the nearest enclosing
+ * div that actually holds the options, and still matches the older markup,
+ * where that div was the parent.
+ */
 function groupRow(page, group) {
+  // Matched case-insensitively: the source writes "Shelf life" where the form
+  // renders "Shelf Life", and that one capital was enough to drop the value —
+  // with it, "2 years" resolves to the row's own "24 months".
+  const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const lower = 'abcdefghijklmnopqrstuvwxyz';
+  const wanted = String(group).toLowerCase();
   return page
     .locator(
-      `xpath=//*[normalize-space(text())="${group}"]/parent::div[.//input[@type="radio" or @type="checkbox"]][1]`,
+      `xpath=//*[normalize-space(translate(text(),'${upper}','${lower}'))="${wanted}"]` +
+        '/ancestor::div[.//input[@type="radio" or @type="checkbox"]][1]',
     )
     .last();
 }
@@ -320,12 +344,31 @@ export async function fillSpecs(page, product) {
   const done = [];
   const missingRequired = [];
   const unrepresentable = [];
+  // Tracked per SOURCE field, because one field is planned under several
+  // portal names: "Strength" is also tried as "Dose". Reporting each alias
+  // that found no row would say a value was dropped when it was in fact set.
+  const bySource = new Map();
   for (const step of plan) {
     const r = await trySelect({ page, ...step });
-    if (r.selected) done.push(`${r.group}=${r.value}`);
-    else if (r.unrepresentable) unrepresentable.push(r);
-    else if (step.required && r.present) missingRequired.push(step.group);
+    const record = bySource.get(step.sourceGroup) || { value: step.candidates?.[0] ?? '', settled: false };
+    if (r.selected) {
+      done.push(`${r.group}=${r.value}`);
+      record.settled = true;
+    } else if (r.unrepresentable) {
+      unrepresentable.push(r);
+      record.settled = true;
+    } else if (step.required && r.present) {
+      missingRequired.push(step.group);
+      record.settled = true;
+    }
+    bySource.set(step.sourceGroup, record);
   }
+  // A value we hold that this form has no row for at all. Ignoring it silently
+  // is how a product went live with every specification empty: the rows were
+  // on the page, the locator simply did not find them, and nothing said so.
+  const noSuchRow = [...bySource.entries()]
+    .filter(([, record]) => !record.settled)
+    .map(([sourceGroup, record]) => `${sourceGroup}=${record.value}`);
   for (const detail of deriveAdditionalDetails(product)) {
     const result = await tryFillDetail(page, detail);
     if (result.filled) {
@@ -338,6 +381,11 @@ export async function fillSpecs(page, product) {
   done.push(...(await fillIngredientStrength(page, product, rows)));
 
   log.info(`  specs/details set: ${done.join(', ') || '(none)'}`);
+  if (noSuchRow.length) {
+    log.warn(
+      `  ${noSuchRow.length} value(s) had no matching row on this form: ${noSuchRow.join(', ')}`,
+    );
+  }
 
   // Name what IndiaMART still wants, with the choices it offers, so the gap can
   // be closed in Specs JSON instead of guessed at here.
@@ -377,5 +425,5 @@ export async function fillSpecs(page, product) {
     );
   });
   if (missingRequired.length) log.warn(`  could not set required: ${missingRequired.join(', ')}`);
-  return { done, missingRequired, unrepresentable, leftBlank };
+  return { done, missingRequired, unrepresentable, leftBlank, noSuchRow };
 }
