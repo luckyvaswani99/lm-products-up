@@ -752,12 +752,13 @@ export class Uploader {
         );
       }
 
-      await photoCard.click({ timeout: 5000 });
+      await clickThrough(photoCard, 10000);
       const uploadButton = p.locator('.uploadbtndiv button').filter({ hasText: /upload photos from computer/i }).last();
-      await uploadButton.waitFor({ state: 'visible', timeout: 5000 });
+      await uploadButton.waitFor({ state: 'visible', timeout: 10000 });
 
-      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 5000 }));
-      await uploadButton.click();
+      // Same picker, same reasons it can be slow or covered.
+      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 20000 }));
+      await clickThrough(uploadButton, 10000);
       const chooser = await chooserPromise;
       if (images.length > 1 && !chooser.isMultiple()) {
         throw new Error(`IndiaMART file input accepted only one file; ${images.length} were prepared`);
@@ -860,8 +861,11 @@ export class Uploader {
       // the visible card establishes the active product context, then its file
       // chooser starts both the document upload and PDF-to-image conversion.
       // Save and Continue must not run until both services acknowledge success.
-      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 5000 }));
-      await pdfCard.locator('.actionPDF').click({ timeout: 5000 });
+      // The picker is the portal's, and it can be slow to appear or blocked by
+      // a layer the previous step left behind — one product failed on
+      // "waitForEvent: Timeout 5000ms … filechooser" with nothing else wrong.
+      const chooserPromise = detachable(p.waitForEvent('filechooser', { timeout: 20000 }));
+      await clickThrough(pdfCard.locator('.actionPDF'), 10000);
       const chooser = await chooserPromise;
 
       const uploadPromise = detachable(p.waitForResponse(
@@ -1439,8 +1443,8 @@ export class Uploader {
         .filter({ hasText: /upload photos from computer/i })
         .last();
       await uploadButton.waitFor({ state: 'visible', timeout: 10000 });
-      const chooserPromise = detachable(this.page.waitForEvent('filechooser', { timeout: 10000 }));
-      await uploadButton.click();
+      const chooserPromise = detachable(this.page.waitForEvent('filechooser', { timeout: 20000 }));
+      await clickThrough(uploadButton, 10000);
       const chooser = await chooserPromise;
       if (prepared.length > 1 && !chooser.isMultiple()) {
         throw new Error(`IndiaMART accepted only one file while ${prepared.length} gallery photos are missing`);
