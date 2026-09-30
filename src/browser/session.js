@@ -93,6 +93,31 @@ async function confirmLoggedInSilently(ctx) {
 }
 
 /**
+ * Sign out of IndiaMART.
+ *
+ * The session is whatever cookies the persistent Chromium profile holds, so
+ * signing out means clearing those — not just flipping the status flag, which
+ * would leave the account signed in while the app claimed otherwise. The result
+ * is read back the same way login() checks itself, so "signed out" is something
+ * observed rather than assumed.
+ */
+export async function logout() {
+  const { ctx } = await openContext({ headful: false });
+  try {
+    await ctx.clearCookies();
+    const stillIn = await confirmLoggedInSilently(ctx);
+    if (stillIn) {
+      throw new Error('IndiaMART still answers as signed in after clearing the session cookies');
+    }
+    markLoggedIn(false);
+    log.ok('Signed out of IndiaMART — the next upload will ask for a fresh login.');
+    return true;
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
+/**
  * Interactive login. Opens the portal ONCE and then polls in the background
  * (no extra tab/window, no reload) so you can enter your mobile number + OTP
  * undisturbed.

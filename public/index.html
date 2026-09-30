@@ -20,7 +20,9 @@
 
     <section class="toolbar">
       <div class="group">
-        <button class="btn" data-act="login">🔐 Login</button>
+        <!-- One control for the session; its label and action follow the
+             current state and are set by renderSessionButton(). -->
+        <button class="btn" id="sessionBtn" data-act="login">🔐 Sign in</button>
         <button class="btn ghost" data-act="testseo" title="Check the DeepSeek text model">🧪 Test text</button>
         <button class="btn ghost" data-act="testimage" title="Check the AI image model">🧪 Test image</button>
         <span class="chips" id="configChips"></span>

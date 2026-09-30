@@ -132,6 +132,23 @@ function renderImageAiSummary(imageAi = true) {
   }
 }
 
+/**
+ * One button for the IndiaMART session, offering the action that is actually
+ * available: signed in shows Sign out, signed out shows Sign in. The state
+ * comes from the same marker the "session" chip reads, so the two can never
+ * disagree.
+ */
+function renderSessionButton(signedIn) {
+  const button = $('#sessionBtn');
+  if (!button) return;
+  button.dataset.act = signedIn ? 'logout' : 'login';
+  button.textContent = signedIn ? '🔓 Sign out' : '🔐 Sign in';
+  button.title = signedIn
+    ? 'Signed in to IndiaMART — sign out to clear this browser profile’s session'
+    : 'Not signed in — opens IndiaMART so you can sign in with your mobile + OTP';
+  button.classList.toggle('ghost', signedIn);
+}
+
 function renderChips(cfg) {
   const key = (name, on) => `<span class="chip ${on ? 'on' : 'off'}">${name} ${on ? '✓' : '✗'}</span>`;
   const backgroundRemovalEnabled = cfg.backgroundRemoval?.settings?.enabled === true;
@@ -147,6 +164,7 @@ function renderChips(cfg) {
     `<span class="chip ${backgroundRemovalEnabled ? 'on' : ''}">background: ${backgroundRemovalEnabled ? 'u2netp CPU' : 'off'}</span>` +
     `<span class="chip ${watermarkEnabled ? 'on' : ''}">watermark: ${watermarkEnabled ? cfg.watermark.settings.mode : 'off'}</span>` +
     `<span class="chip ${imageAiEnabled ? 'on' : ''}">ai-images: ${imageAiEnabled ? 'on' : 'off'}</span>`;
+  renderSessionButton(cfg.sessionExists === true);
   renderProductPdf(cfg.productPdf);
   renderBackgroundRemovalSummary(cfg.backgroundRemoval || {});
   renderWatermarkSummary(cfg.watermark || {});
@@ -237,6 +255,7 @@ function setJob(running, name) {
 // ---------------- actions ----------------
 const ACTIONS = {
   login: () => api('POST', '/api/login'),
+  logout: () => api('POST', '/api/logout'),
   import: () => api('POST', '/api/import', { file: $('#importFile').value.trim() }),
   scrape: () =>
     api('POST', '/api/scrape', {
@@ -267,6 +286,10 @@ document.addEventListener('click', async (e) => {
     if (act === 'single' && !$('#singleUrl').value.trim()) return toast('Paste a product URL first', 'err');
     if (act === 'catalog' && !$('#catalogUrl').value.trim())
       return toast('Paste a seller category page URL first', 'err');
+    // Signing out means the next upload needs a fresh mobile + OTP, so it is
+    // never done on a stray click.
+    if (act === 'logout' && !confirm('Sign out of IndiaMART? The next upload will need your mobile number and OTP again.'))
+      return;
     try {
       await ACTIONS[act]();
       setJob(true, act);

@@ -22,7 +22,7 @@ import {
   resetStage,
   status,
 } from './pipeline.js';
-import { login, isMarkedLoggedIn } from './browser/session.js';
+import { login, logout, isMarkedLoggedIn } from './browser/session.js';
 import { testSeo } from './ai/seoContent.js';
 import { testImage } from './images/aiImage.js';
 import {
@@ -281,6 +281,16 @@ app.get(['/media/upload-preview/:id', '/media/upload-preview/:id/:index'], async
 app.post('/api/login', (_req, res) => {
   try {
     runJob('login', () => login());
+    ok(res);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+// Signing out clears the browser profile's IndiaMART cookies, so it must not
+// run while a job is driving that same profile.
+app.post('/api/logout', (_req, res) => {
+  try {
+    runJob('logout', () => logout());
     ok(res);
   } catch (e) {
     fail(res, e);
