@@ -304,6 +304,35 @@ export class Uploader {
     return file;
   }
 
+  /**
+   * Time one upload phase. Collected rather than logged line by line, and
+   * reported as a single summary when the product finishes — an upload is
+   * almost entirely waiting on IndiaMART, and without this the only way to see
+   * which wait dominates is to read timestamps out of the log by hand. That is
+   * how a 15s and a 10s wait were found expiring in full on every product.
+   */
+  async _timed(label, run) {
+    const started = Date.now();
+    try {
+      return await run();
+    } finally {
+      this.timings = this.timings || [];
+      this.timings.push({ label, seconds: (Date.now() - started) / 1000 });
+    }
+  }
+
+  /** One line naming where a product's time actually went, slowest first. */
+  _reportTimings() {
+    const timings = this.timings || [];
+    if (!timings.length) return;
+    const total = timings.reduce((sum, t) => sum + t.seconds, 0);
+    const parts = [...timings]
+      .sort((a, b) => b.seconds - a.seconds)
+      .map((t) => `${t.label} ${t.seconds.toFixed(1)}s`);
+    log.info(`  ⏱ ${total.toFixed(1)}s — ${parts.join(', ')}`);
+    this.timings = [];
+  }
+
   async gotoManage() {
     // IndiaMART answers this URL with its own recommendation view now and then
     // ("?opensuggprodview=redirectsellerrecom"), where no "Active (N)" tab
@@ -811,7 +840,9 @@ export class Uploader {
       ));
       await chooser.setFiles(pdfPath);
 
-      const [uploadResponse, conversionResponse] = await Promise.all([uploadPromise, conversionPromise]);
+      const [uploadResponse, conversionResponse] = await this._timed('PDF · upload + convert', () =>
+        Promise.all([uploadPromise, conversionPromise]),
+      );
       const parseResponse = async (response, service) => {
         const body = await response.text();
         let data;
@@ -845,7 +876,9 @@ export class Uploader {
       // PDF page(s) to add to the gallery. Until its explicit Save button runs,
       // the dialog covers Save and Continue and the PDF is not committed.
       const previewModal = p.locator('#savephotoModal_g02.show-modal');
+      const previewStarted = Date.now();
       if (await previewModal.isVisible().catch(() => false)) {
+
         const selectedPreviewCount = Number(
           (await previewModal.locator('#no_of_selected_images').innerText().catch(() => '0')).trim(),
         );
@@ -869,8 +902,11 @@ export class Uploader {
         // 200 — and the dialog simply stayed on screen, covering the PDF card
         // so a retry could not even reach it ("#savephotoModal_g02 … intercepts
         // pointer events"). Close it rather than failing the product over it.
+        // Measured: this dialog does not close itself after saving — the wait
+        // expired in full on every product, 15s each. Give it a moment in case
+        // a different form does close it, then dismiss it outright.
         const closed = await previewModal
-          .waitFor({ state: 'hidden', timeout: 15000 })
+          .waitFor({ state: 'hidden', timeout: 2000 })
           .then(() => true)
           .catch(() => false);
         if (!closed) {
@@ -887,8 +923,12 @@ export class Uploader {
         // canvas; otherwise this z-index overlay remains above the subsequent
         // specification form and intercepts every radio-button click.
         const previewCrop = p.locator('#im-crop-block.is-visible-imcrp');
+        // Same measurement: on this form the crop popup never opens for the
+        // rendered page, and the full 10s was spent finding that out every
+        // time. It is still handled when it does appear — it did on other
+        // category forms — just no longer paid for when it does not.
         const cropOpened = await previewCrop
-          .waitFor({ state: 'visible', timeout: 10000 })
+          .waitFor({ state: 'visible', timeout: 2500 })
           .then(() => true)
           .catch(() => false);
         if (cropOpened) {
@@ -905,13 +945,15 @@ export class Uploader {
           // that here rather than letting it surface seconds later as a
           // blocked Save and Continue.
           const reopened = await previewCrop
-            .waitFor({ state: 'visible', timeout: 3000 })
+            .waitFor({ state: 'visible', timeout: 2000 })
             .then(() => true)
             .catch(() => false);
           if (reopened) await this._drainImageReview('after the PDF preview');
         }
       }
 
+      this.timings = this.timings || [];
+      this.timings.push({ label: 'PDF · rendered page to gallery', seconds: (Date.now() - previewStarted) / 1000 });
       log.info(
         `  PDF uploaded and converted: ${attachedName} (${conversion.NO_OF_IMG_RENDERED} preview image(s))`,
       );
@@ -1580,7 +1622,8 @@ export class Uploader {
    * Active item exists.
    */
   async addProduct(product, { dryRun = false, skipDuplicateCheck = false } = {}) {
-    await this.gotoManage();
+    this.timings = [];
+    await this._timed('open Manage Products', () => this.gotoManage());
     const before = await this.activeCount();
     // With the duplicate lookup skipped, nothing is reconciled: the product
     // goes straight through Add Product. IndiaMART refuses a duplicate name
@@ -1607,19 +1650,23 @@ export class Uploader {
         repaired = await this._completeExistingProduct(product, reopened, { before });
       }
       await this._assertOnlyTouched(namedBeforeRepair, existing.itemId, product);
+      this._reportTimings();
       return repaired;
     }
 
     // Record who already carries this name. Adding a product must produce a
     // NEW item id under it; an id that held the name beforehand turning up as
     // "the new listing" means an existing one was edited, never an upload.
-    const namedBefore = await this._namedBefore(product);
+    const namedBefore = await this._timed('name snapshot', () => this._namedBefore(product));
     const knownItemIds = new Set(namedBefore.keys());
 
-    await this._openForm();
-    await this._fillBasics(product);
-    await this._uploadPhotos(product);
-    await this._uploadPdf();
+    // Timed per phase: an upload is almost all waiting on IndiaMART, and
+    // without this the only way to know which wait dominates is to read
+    // timestamps out of the log by hand.
+    await this._timed('open form', () => this._openForm());
+    await this._timed('basics + description', () => this._fillBasics(product));
+    await this._timed('photos', () => this._uploadPhotos(product));
+    await this._timed('PDF', () => this._uploadPdf());
 
     if (dryRun) {
       log.warn('  dry-run: not clicking Finish');
@@ -1628,7 +1675,7 @@ export class Uploader {
 
     let finishError = null;
     try {
-      await this._finish(product);
+      await this._timed('save + specifications', () => this._finish(product));
     } catch (error) {
       finishError = error;
       log.warn(`  initial finish was interrupted; checking for a partial exact item: ${error.message}`);
@@ -1639,7 +1686,7 @@ export class Uploader {
     // in place so a retry cannot create a duplicate and partial media/specs are
     // completed before reporting success.
     await this.gotoManage();
-    const live = await this._findActiveProduct(product);
+    const live = await this._timed('find the new listing', () => this._findActiveProduct(product));
     if (live) {
       // Matching purely by name is self-fulfilling: if the form had renamed an
       // existing listing, that listing now carries this product's name and
@@ -1651,10 +1698,13 @@ export class Uploader {
             `product being created. Check that item on Manage Products; nothing else was changed.`,
         );
       }
-      const result = await this._completeExistingProduct(product, live, { before });
-      await this._assertOnlyTouched(namedBefore, live.itemId, product);
+      const result = await this._timed('verify + complete', () =>
+        this._completeExistingProduct(product, live, { before }),
+      );
+      await this._timed('collateral check', () => this._assertOnlyTouched(namedBefore, live.itemId, product));
       // Reached through Add Product on an item id that did not exist before, so
       // this is a newly created listing rather than a reconciled one.
+      this._reportTimings();
       return { ...result, repaired: false, created: true };
     }
     if (finishError) throw finishError;

@@ -10,12 +10,29 @@ import { log } from '../logger.js';
  * (`npm run login`); the cookies live in INDIAMART_SESSION_DIR and every later
  * run reuses them — no password is ever handled by this tool.
  */
+/**
+ * A visible window whose page fills it, like an ordinary browser.
+ *
+ * Playwright sizes the page independently of the window, so a fixed 1440x900
+ * viewport inside a larger window renders the portal into part of the frame and
+ * cuts the rest off — controls that are plainly on screen in a normal browser
+ * are simply not there. `viewport: null` hands sizing back to the window, and
+ * the window is maximised.
+ *
+ * This is not only about seeing it. A bigger page means more of Manage Products
+ * and more of the specification form are in view at once, so there is less
+ * scrolling into view before every click.
+ */
 export async function openContext({ headful = config.indiamart.headful } = {}) {
   fs.mkdirSync(config.indiamart.sessionDir, { recursive: true });
   const ctx = await chromium.launchPersistentContext(config.indiamart.sessionDir, {
     headless: !headful,
-    viewport: { width: 1440, height: 900 },
-    args: ['--disable-blink-features=AutomationControlled'],
+    // Headless has no window to follow, so it keeps an explicit large page.
+    viewport: headful ? null : { width: 1920, height: 1080 },
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      ...(headful ? ['--start-maximized'] : ['--window-size=1920,1080']),
+    ],
   });
   const page = ctx.pages()[0] || (await ctx.newPage());
   return { ctx, page };
