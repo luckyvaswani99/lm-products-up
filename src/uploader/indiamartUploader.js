@@ -241,6 +241,29 @@ async function dismissModal(modal) {
   return !(await modal.isVisible().catch(() => false));
 }
 
+/**
+ * Click a control, and if something invisible is sitting over it, run its own
+ * handler instead.
+ *
+ * Observed mid-run: the crop popup's "Upload Photo" button was visible, enabled
+ * and stable, and every click bounced off `<div class="photodocouterdiv">` from
+ * the file-picker layer that had not gone away yet — ten seconds of retries,
+ * then a failed product. Firing the element's own click reaches the same
+ * handler the button carries (saveAllImagesIMCropper), cannot land on a
+ * neighbouring control, and the caller still verifies the outcome: the popup
+ * has to close, or the step fails as before.
+ */
+async function clickThrough(locator, timeout = 10000) {
+  try {
+    await locator.click({ timeout });
+    return 'clicked';
+  } catch (error) {
+    if (!/intercepts pointer events/i.test(error.message)) throw error;
+    await locator.evaluate((element) => element.click());
+    return 'clicked through an overlay';
+  }
+}
+
 /** Close IndiaMART's "suggested products" / promo modals if one is open. */
 async function dismissPopups(page) {
   const closers = [
@@ -571,6 +594,7 @@ export class Uploader {
 
   async _fillBasics(product) {
     const p = this.page;
+    this.acceptedUnit = null;
     const seo = product.seo || {};
     const rawName = seo.name || product.name;
     const name = uploadProductName(product);
@@ -602,7 +626,21 @@ export class Uploader {
         // The current portal requires choosing a suggested unit; typing alone
         // leaves its internal unit value unset and Save and Continue does nothing.
         const unitChoice = p.locator('#unitSugg li').first();
-        if (await unitChoice.isVisible().catch(() => false)) await unitChoice.click();
+        if (await unitChoice.isVisible().catch(() => false)) {
+          await unitChoice.click();
+          // IndiaMART owns this vocabulary and answers with its own spelling —
+          // typing "Stripe" gets you its "Strip". That is the portal
+          // normalising our value, not the listing losing it, so record what it
+          // settled on and hold the listing to that.
+          await p.waitForTimeout(300);
+          const settled = (await unitField.inputValue().catch(() => '')).trim();
+          if (settled && slugify(settled) !== slugify(String(product.unit))) {
+            this.acceptedUnit = settled;
+            log.info(`  IndiaMART resolved unit "${product.unit}" to its own "${settled}"`);
+          } else {
+            this.acceptedUnit = null;
+          }
+        }
       }
     }
 
@@ -738,7 +776,7 @@ export class Uploader {
         const confirmed = await waitForCropSelection(p, crop, images.length);
         log.info(`  crop popup holds ${confirmed}/${images.length} selected photo(s)`);
         const uploadPhoto = crop.getByText(/^Upload Photos?$/, { exact: true }).last();
-        await uploadPhoto.click({ timeout: 10000 });
+        await clickThrough(uploadPhoto);
         logPhotoRejections(await readPhotoRejections(p), 'this new listing');
         await crop.waitFor({ state: 'hidden', timeout: 30000 });
       } else {
@@ -937,7 +975,7 @@ export class Uploader {
             throw new Error(`IndiaMART PDF preview crop dialog was not ready: ${cropText.slice(0, 300)}`);
           }
           const uploadPreview = previewCrop.getByText(/^Upload Photos?$/, { exact: true }).last();
-          await uploadPreview.click({ timeout: 10000 });
+          await clickThrough(uploadPreview);
           await previewCrop.waitFor({ state: 'hidden', timeout: 20000 });
           log.info('  PDF preview crop confirmed without modifying the rendered page');
 
@@ -982,7 +1020,7 @@ export class Uploader {
       if (!(await uploadPhotos.isVisible().catch(() => false))) {
         throw new Error('IndiaMART image review popup reopened without an Upload Photos confirmation');
       }
-      await uploadPhotos.click({ timeout: 10000 });
+      await clickThrough(uploadPhotos);
       await crop.waitFor({ state: 'hidden', timeout: 20000 });
       await p.waitForTimeout(750);
       log.info(`  confirmed reopened image review ${stage} (pass ${pass + 1})`);
@@ -1057,13 +1095,19 @@ export class Uploader {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
       }
     }
-    if (!(await tryClick(finish, 10000))) {
+    // Finish is a plain enabled button; when a click on it fails it is because
+    // a leftover portal layer is over it, not because the form is not ready —
+    // the failure screenshot showed it green and clickable. Reach its own
+    // handler in that case, exactly as the photo controls do.
+    await clickThrough(finish, 10000).catch((error) => {
       throw new Error(
-        fillSpecifications
-          ? 'Could not click Finish after setting specifications'
-          : 'Could not click Finish after updating the description',
+        `${
+          fillSpecifications
+            ? 'Could not click Finish after setting specifications'
+            : 'Could not click Finish after updating the description'
+        }: ${error.message.split('\n')[0]}`,
       );
-    }
+    });
     await p.waitForTimeout(1800);
 
     // If IndiaMART still reports missing specs, re-read the rendered form once
@@ -1074,7 +1118,9 @@ export class Uploader {
       if (result.missingRequired.length) {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
       }
-      if (!(await tryClick(p.getByText(SEL.finish, { exact: false }), 10000))) {
+      const retryFinish = p.getByText(SEL.finish, { exact: false }).first();
+      const retried = await clickThrough(retryFinish, 10000).then(() => true).catch(() => false);
+      if (!retried) {
         throw new Error('Could not click Finish after retrying specifications');
       }
       await p.waitForTimeout(1800);
@@ -1406,7 +1452,7 @@ export class Uploader {
       const confirmed = await waitForCropSelection(this.page, crop, expectedTotal, baseline);
       log.info(`  crop popup holds ${confirmed}/${expectedTotal} photo(s) for item ${live.itemId}`);
       const uploadPhotos = crop.getByText(/^Upload Photos?$/, { exact: true }).last();
-      await uploadPhotos.click({ timeout: 10000 });
+      await clickThrough(uploadPhotos);
       const rejected = await readPhotoRejections(this.page, 8000);
       logPhotoRejections(rejected, `item ${live.itemId}`);
       await crop.waitFor({ state: 'hidden', timeout: 30000 });
@@ -1490,7 +1536,9 @@ export class Uploader {
     if (String(openedPrice).trim() !== String(product.price ?? '').trim()) {
       throw new Error(`IndiaMART item ${itemId} retained price "${openedPrice}" instead of "${product.price}"`);
     }
-    if (slugify(openedUnit) !== slugify(product.unit)) {
+    const unitIsOurs = slugify(openedUnit) === slugify(product.unit);
+    const unitIsPortals = this.acceptedUnit && slugify(openedUnit) === slugify(this.acceptedUnit);
+    if (!unitIsOurs && !unitIsPortals) {
       throw new Error(`IndiaMART item ${itemId} retained unit "${openedUnit}" instead of "${product.unit}"`);
     }
     if (!(await this._pdfName(verificationForm))) {

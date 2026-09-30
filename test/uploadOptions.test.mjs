@@ -89,3 +89,79 @@ test('the duplicate lookup can be turned off for a run', async (t) => {
     assert.match(pipeline, /duplicate lookup off/);
   });
 });
+
+/**
+ * Controls that are visible, enabled and stable, and still cannot be clicked.
+ *
+ * Seen mid-run on three separate products: the crop popup's "Upload Photo"
+ * button bounced off `<div class="photodocouterdiv">` left behind by the file
+ * picker, and Finish bounced off a leftover portal layer while the failure
+ * screenshot showed it green and ready. Each cost ten seconds of retries and
+ * then the product.
+ */
+test('a control behind a stale overlay is still reached', async (t) => {
+  const { chromium } = await import('playwright');
+  const uploader = fs.readFileSync(new URL('../src/uploader/indiamartUploader.js', import.meta.url), 'utf8');
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  t.after(() => browser.close());
+
+  const clickThrough = uploader.match(/async function clickThrough\([\s\S]*?\n}/)?.[0];
+  assert.ok(clickThrough, 'clickThrough must exist');
+
+  /** An overlay covering the button, exactly as the portal leaves one. */
+  const setup = async (covered) => {
+    await page.setContent(`
+      <button id="go" onclick="window.fired = true">Upload Photo</button>
+      ${covered ? '<div class="photodocouterdiv" style="position:fixed;inset:0"></div>' : ''}`);
+    await page.evaluate(() => { window.fired = false; });
+  };
+  const run = () =>
+    page.evaluate(async (source) => {
+      const el = document.getElementById('go');
+      const locator = {
+        click: () => {
+          const top = document.elementFromPoint(
+            el.getBoundingClientRect().x + 2,
+            el.getBoundingClientRect().y + 2,
+          );
+          if (top !== el) return Promise.reject(new Error('… subtree intercepts pointer events'));
+          el.click();
+          return Promise.resolve();
+        },
+        evaluate: (fn) => Promise.resolve(fn(el)),
+      };
+      // eslint-disable-next-line no-new-func
+      const fn = new Function(`${source}\nreturn clickThrough;`)();
+      return fn(locator, 500);
+    }, clickThrough);
+
+  await t.test('an ordinary click is used when nothing is in the way', async () => {
+    await setup(false);
+    assert.equal(await run(), 'clicked');
+    assert.equal(await page.evaluate(() => window.fired), true);
+  });
+
+  await t.test('the handler is reached when an overlay intercepts', async () => {
+    await setup(true);
+    assert.equal(await run(), 'clicked through an overlay');
+    assert.equal(await page.evaluate(() => window.fired), true, 'the button’s own handler ran');
+  });
+
+  await t.test('any other click failure is still raised', async () => {
+    const thrown = await page.evaluate((source) => {
+      const locator = { click: () => Promise.reject(new Error('element is not enabled')) };
+      // eslint-disable-next-line no-new-func
+      const fn = new Function(`${source}\nreturn clickThrough;`)();
+      return fn(locator, 10).then(() => null, (e) => e.message);
+    }, clickThrough);
+    assert.match(thrown, /not enabled/);
+  });
+
+  await t.test('the portal’s own unit spelling is accepted, not called a loss', () => {
+    // Typing "Stripe" gets IndiaMART's "Strip"; the listing kept what the
+    // portal resolved, and failing it lost a product that was correct.
+    assert.match(uploader, /this\.acceptedUnit = settled/);
+    assert.match(uploader, /unitIsPortals/);
+  });
+});
