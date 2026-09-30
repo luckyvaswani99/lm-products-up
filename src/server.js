@@ -22,7 +22,7 @@ import {
   resetStage,
   status,
 } from './pipeline.js';
-import { login, logout, isMarkedLoggedIn } from './browser/session.js';
+import { login, logout, openBrowser, isMarkedLoggedIn } from './browser/session.js';
 import { testSeo } from './ai/seoContent.js';
 import { loadSeoSettings, saveSeoSettings } from './ai/seoSettings.js';
 import { testImage } from './images/aiImage.js';
@@ -305,6 +305,16 @@ app.get(['/media/upload-preview/:id', '/media/upload-preview/:id/:index'], async
 app.post('/api/login', (_req, res) => {
   try {
     runJob('login', () => login());
+    ok(res);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+// Handing the browser over occupies the one profile every stage shares, so it
+// runs as a job like everything else that drives it.
+app.post('/api/open-browser', (_req, res) => {
+  try {
+    runJob('browser', () => openBrowser());
     ok(res);
   } catch (e) {
     fail(res, e);

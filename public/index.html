@@ -23,6 +23,11 @@
         <!-- One control for the session; its label and action follow the
              current state and are set by renderSessionButton(). -->
         <button class="btn" id="sessionBtn" data-act="login">🔐 Sign in</button>
+        <button
+          class="btn ghost"
+          data-act="openbrowser"
+          title="Opens the app's own browser on Manage Products so you can work in it by hand. The app waits — and takes the browser back — when you close the window."
+        >🌐 Open browser</button>
         <button class="btn ghost" data-act="testseo" title="Check the DeepSeek text model">🧪 Test text</button>
         <button class="btn ghost" data-act="testimage" title="Check the AI image model">🧪 Test image</button>
         <span class="chips" id="configChips"></span>

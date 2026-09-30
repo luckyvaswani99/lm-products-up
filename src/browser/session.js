@@ -93,6 +93,41 @@ async function confirmLoggedInSilently(ctx) {
 }
 
 /**
+ * Open the app's own browser and hand it to you.
+ *
+ * Same persistent profile every other stage drives, so whatever you do here —
+ * fixing a listing by hand, clearing a portal popup, checking what a page
+ * actually shows — is what the uploader will see next. Only one process can
+ * hold that profile, which is why this runs as a job: nothing else may drive
+ * the browser while you have it.
+ *
+ * It stays open until you close the window, then records whether the session is
+ * still signed in, so the toolbar cannot go on claiming the old state.
+ */
+export async function openBrowser({ timeoutMinutes = 60 } = {}) {
+  const { ctx, page } = await openContext({ headful: true });
+  await page.goto(config.indiamart.sellerUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  await page.bringToFront().catch(() => {});
+  log.step('Browser is yours — close the window when you are done to give it back.');
+
+  const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  while (Date.now() < deadline) {
+    if (!ctx.pages().length) break;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (ctx.pages().length) {
+    log.warn(`  closing the browser after ${timeoutMinutes} minutes so the app is usable again`);
+  }
+
+  const signedIn = await confirmLoggedInSilently(ctx).catch(() => false);
+  markLoggedIn(signedIn);
+  await ctx.close().catch(() => {});
+  log.ok(`Browser closed — IndiaMART session is ${signedIn ? 'signed in' : 'signed out'}.`);
+  return { signedIn };
+}
+
+/**
  * Sign out of IndiaMART.
  *
  * The session is whatever cookies the persistent Chromium profile holds, so

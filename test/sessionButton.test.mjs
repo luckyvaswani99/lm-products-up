@@ -85,3 +85,49 @@ test('the sign-out action and its route exist', async (t) => {
     assert.match(server, /runJob\('logout', \(\) => logout\(\)\)/);
   });
 });
+
+/**
+ * Handing the browser over for manual work.
+ *
+ * It is the same persistent profile every stage drives, and only one process
+ * can hold it — so this has to occupy the job slot like any other stage, and it
+ * has to give the profile back. Verified live: the window opened on Manage
+ * Products, closed itself at the cap, and recorded the session as still signed
+ * in.
+ */
+test('the browser can be handed over and is always taken back', async (t) => {
+  const session = fs.readFileSync(new URL('../src/browser/session.js', import.meta.url), 'utf8');
+  const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const openBrowser = session.slice(session.indexOf('export async function openBrowser'));
+
+  await t.test('it opens the app’s own profile, not a throwaway one', () => {
+    assert.match(openBrowser, /openContext\(\{ headful: true \}\)/);
+  });
+
+  await t.test('it waits for the window to be closed', () => {
+    assert.match(openBrowser, /if \(!ctx\.pages\(\)\.length\) break;/);
+  });
+
+  await t.test('it always closes the context, even after the cap', () => {
+    assert.match(openBrowser, /timeoutMinutes = 60/);
+    assert.match(openBrowser, /await ctx\.close\(\)/);
+  });
+
+  await t.test('it records the session state on the way out', () => {
+    // Otherwise the Sign in / Sign out button keeps claiming the old state
+    // after someone signs in or out by hand.
+    const closing = openBrowser.slice(openBrowser.indexOf('const signedIn'));
+    assert.match(closing, /confirmLoggedInSilently\(ctx\)/);
+    assert.match(closing, /markLoggedIn\(signedIn\)/);
+  });
+
+  await t.test('it occupies the job slot, so nothing else drives the browser', () => {
+    assert.match(server, /app\.post\('\/api\/open-browser'/);
+    assert.match(server, /runJob\('browser', \(\) => openBrowser\(\)\)/);
+  });
+
+  await t.test('the toolbar offers it', () => {
+    assert.match(html, /data-act="openbrowser"/);
+  });
+});

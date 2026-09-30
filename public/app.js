@@ -277,6 +277,7 @@ function setJob(running, name) {
 const ACTIONS = {
   login: () => api('POST', '/api/login'),
   logout: () => api('POST', '/api/logout'),
+  openbrowser: () => api('POST', '/api/open-browser'),
   import: () => api('POST', '/api/import', { file: $('#importFile').value.trim() }),
   scrape: () =>
     api('POST', '/api/scrape', {
@@ -302,6 +303,15 @@ const ACTIONS = {
   testseo: () => api('POST', '/api/test/seo', {}),
   testimage: () => api('POST', '/api/test/image', {}),
   runall: () => api('POST', '/api/runall', {}),
+};
+
+/** What a started action is called in a toast, where the key reads badly. */
+const STARTED = {
+  openbrowser: 'Browser opening — close the window when you are done',
+  logout: 'signing out',
+  login: 'login window opening',
+  repairspecs: 'repairing missing specs',
+  skiplive: 'marking live products as skipped',
 };
 
 /**
@@ -333,7 +343,7 @@ document.addEventListener('click', async (e) => {
     try {
       await ACTIONS[act]();
       setJob(true, act);
-      toast(`${act} started`);
+      toast(STARTED[act] || `${act} started`);
     } catch (err) {
       toast(err.message, 'err', 5000);
     }
