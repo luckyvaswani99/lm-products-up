@@ -839,9 +839,14 @@ export class Uploader {
       }
 
       // Older portal variants return to an Add Photos confirmation dialog;
-      // newer ones attach the gallery immediately after the crop step.
+      // newer ones attach the gallery immediately after the crop step and
+      // leave this button on screen but DISABLED — the crop popup has already
+      // done the work. Clicking it then waits out the timeout and fails a
+      // product whose photos are in: <button disabled class="photodocaddbtn">.
       const confirm = p.getByRole('button', { name: /^add photos$/i }).last();
-      if (await confirm.isVisible().catch(() => false)) {
+      const confirmUsable =
+        (await confirm.isVisible().catch(() => false)) && (await confirm.isEnabled().catch(() => false));
+      if (confirmUsable) {
         await confirm.click({ timeout: 5000 });
         await confirm.waitFor({ state: 'hidden', timeout: 10000 });
       } else {
