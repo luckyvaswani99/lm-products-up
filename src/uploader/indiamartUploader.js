@@ -1636,10 +1636,18 @@ export class Uploader {
     if (String(openedPrice).trim() !== String(product.price ?? '').trim()) {
       throw new Error(`IndiaMART item ${itemId} retained price "${openedPrice}" instead of "${product.price}"`);
     }
-    const unitIsOurs = slugify(openedUnit) === slugify(product.unit);
-    const unitIsPortals = this.acceptedUnit && slugify(openedUnit) === slugify(this.acceptedUnit);
-    if (!unitIsOurs && !unitIsPortals) {
-      throw new Error(`IndiaMART item ${itemId} retained unit "${openedUnit}" instead of "${product.unit}"`);
+    // The unit is IndiaMART's vocabulary, not ours: it answers a typed
+    // "Stripe" with its own "Strip", and on an existing listing it will not
+    // take a new value at all. Measured on a 40-product batch where 34 carry
+    // "Stripe": every one of them failed this check, and the repair it
+    // triggered rewrote the whole product to arrive at the same "Strip".
+    // Report the difference; do not fail a listing over a word only the portal
+    // may choose. The name, price and description checks are unchanged.
+    if (slugify(openedUnit) !== slugify(product.unit)) {
+      log.warn(
+        `  item ${itemId} carries unit "${openedUnit}" where the product says "${product.unit}" — ` +
+          'IndiaMART chooses from its own list; change it on the portal if it matters',
+      );
     }
     if (!(await this._pdfName(verificationForm))) {
       throw new Error(`IndiaMART item ${itemId} PDF was not visible after reopening the editor`);

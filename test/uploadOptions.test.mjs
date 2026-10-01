@@ -209,10 +209,13 @@ test('a control behind a stale overlay is still reached', async (t) => {
     assert.match(thrown, /not enabled/);
   });
 
-  await t.test('the portal’s own unit spelling is accepted, not called a loss', () => {
-    // Typing "Stripe" gets IndiaMART's "Strip"; the listing kept what the
-    // portal resolved, and failing it lost a product that was correct.
-    assert.match(uploader, /this\.acceptedUnit = settled/);
-    assert.match(uploader, /unitIsPortals/);
+  await t.test('a unit only the portal may choose is reported, never failed', () => {
+    // IndiaMART answers a typed "Stripe" with its own "Strip", and will not
+    // take a new unit on an existing listing at all. On a 40-product batch
+    // where 34 carry "Stripe", failing that check rewrote every product to
+    // arrive at exactly the same value.
+    const verify = uploader.slice(uploader.indexOf('const unitIsOurs') >= 0 ? uploader.indexOf('const unitIsOurs') : uploader.indexOf('slugify(openedUnit)'));
+    assert.doesNotMatch(verify.slice(0, 600), /throw new Error\([^)]*retained unit/);
+    assert.match(uploader, /carries unit "\$\{openedUnit\}" where the product says/);
   });
 });
