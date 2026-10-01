@@ -151,9 +151,14 @@ test('listings are found through the portal search box', async (t) => {
     await managePage(CATALOGUE);
     const ids = await uploader._itemIdsNamed('Thalix Capsules');
     assert.deepEqual([...ids.keys()].sort(), ['332821856', '332821858']);
+    // Both item ids are named, because one of them has to be deleted before
+    // the product can be reconciled — "refusing to choose" alone is a dead end.
     await assert.rejects(
       () => uploader._findActiveProduct({ name: 'Thalix Capsules' }),
-      /multiple exact live products/i,
+      (error) =>
+        /refusing to choose one automatically/i.test(error.message) &&
+        error.message.includes('item 332821858') &&
+        error.message.includes('item 332821856'),
     );
   });
 });

@@ -25,6 +25,19 @@ const SEL = {
   finish: 'Finish',
 };
 
+/**
+ * Re-raise a failure that happened AFTER the listing was already created.
+ *
+ * "upload failed" on a product that is sitting live on the portal reads as if
+ * nothing happened, and the next run has to rediscover it. Naming the item says
+ * what is actually true: the listing exists, and this is what is wrong with it.
+ */
+function failedAfterCreating(itemId, error) {
+  const message = String(error?.message || error);
+  if (message.includes(`item ${itemId}`)) throw error;
+  throw new Error(`IndiaMART item ${itemId} is live but incomplete: ${message}`, { cause: error });
+}
+
 /** The first line of an error, which is the part worth putting in a log. */
 function firstLine(error) {
   return String(error?.message || error).split(/\r?\n/)[0];
@@ -608,19 +621,35 @@ export class Uploader {
     if (!name) throw new Error('Product name is empty after applying IndiaMART character rules');
     if (name !== rawName) log.info(`  adjusted product name for IndiaMART: ${name}`);
     const form = await this._productForm();
-    await (await formField(form, 'nameOfProduct', SEL.name)).fill(name);
-    if (product.price !== '' && product.price != null)
-      await (await formField(form, 'priceOfProduct', SEL.price)).fill(String(product.price));
+
+    // Only write a field that does not already hold the value. On a listing
+    // being reconciled these are usually right already, and typing over them
+    // is time spent to end up where the form started.
+    const nameField = await formField(form, 'nameOfProduct', SEL.name);
+    if ((await nameField.inputValue().catch(() => '')) !== name) await nameField.fill(name);
+
+    if (product.price !== '' && product.price != null) {
+      const priceField = await formField(form, 'priceOfProduct', SEL.price);
+      const price = String(product.price);
+      if ((await priceField.inputValue().catch(() => '')).trim() !== price) await priceField.fill(price);
+    }
     if (product.unit) {
       const unitField = await formField(form, 'unitOfProduct', SEL.unit);
       // On an existing listing IndiaMART locks the unit, and asking whether it
       // is disabled is not enough: one listing's input carried no `disabled`
       // attribute at all and `fill` still spent its whole 30s on "element is
       // not enabled". Try to type, and treat a refusal as locked.
-      const typed = await unitField
-        .fill(String(product.unit), { timeout: 5000 })
-        .then(() => true)
-        .catch(() => false);
+      const held = (await unitField.inputValue().catch(() => '')).trim();
+      const alreadyRight =
+        slugify(held) === slugify(String(product.unit)) ||
+        (this.acceptedUnit && slugify(held) === slugify(this.acceptedUnit));
+      const typed = alreadyRight
+        ? true
+        : await unitField
+            .fill(String(product.unit), { timeout: 5000 })
+            .then(() => true)
+            .catch(() => false);
+      if (alreadyRight) this.acceptedUnit = held;
       if (!typed) {
         const current = (await unitField.inputValue().catch(() => '')).trim();
         // Locked means it cannot be changed from here at all, so failing the
@@ -670,6 +699,15 @@ export class Uploader {
       throw new Error(
         `Product description is ${descriptionLength} characters; maximum is ${DESCRIPTION_MAX_CHARS}`,
       );
+    }
+
+    // Rewriting a description that already matches costs seconds of TinyMCE
+    // work for no change at all, and a reconcile pass does it on every product.
+    const wanted = visibleDescriptionText(descriptionHtml).replace(/\s+/g, ' ').trim();
+    const current = await this._readDescriptionText().catch(() => null);
+    if (current !== null && current === wanted) {
+      log.info(`  description already matches (${descriptionLength} characters) — left as is`);
+      return { html: descriptionHtml, formattedLength: descriptionLength, unchanged: true };
     }
 
     // The current form uses TinyMCE in an iframe. Set semantic HTML through
@@ -1222,24 +1260,26 @@ export class Uploader {
     const candidateNames = [uploadProductName(product), product.seo?.name, product.name].filter(Boolean);
     const candidates = new Set(candidateNames.map((name) => slugify(name)));
 
-    // Search each spelling this product could be live under and pool the hits;
-    // the exact-slug filter below still decides what counts as the same listing.
-    const rows = [];
-    const seen = new Set();
+    // One search, not one per spelling. The name submitted is the name the
+    // listing carries, so searching it finds the listing on the first try; the
+    // other spellings are only tried when that genuinely finds nothing. Each
+    // search costs about 4s, and this used to run up to three of them for
+    // every lookup — and the lookup itself happens several times per product.
+    let matches = [];
     for (const name of [...new Set(candidateNames)]) {
       // eslint-disable-next-line no-await-in-loop
-      for (const row of await this._searchProducts(name)) {
-        if (seen.has(row.itemId)) continue;
-        seen.add(row.itemId);
-        rows.push(row);
-      }
+      const rows = await this._searchProducts(name);
+      matches = rows.filter((row) => row.itemId && candidates.has(slugify(row.name)));
+      if (matches.length) break;
     }
-
-    const matches = rows.filter((row) => row.itemId && candidates.has(slugify(row.name)));
     if (matches.length > 1) {
+      // Naming them is the difference between a dead end and a fix: these are
+      // the listings to look at, and one of them has to go before this product
+      // can be reconciled.
       throw new Error(
-        `Found multiple exact live products named "${uploadProductName(product)}"; ` +
-          'refusing to choose one automatically',
+        `IndiaMART carries ${matches.length} Active listings named ` +
+          `"${uploadProductName(product)}" (${matches.map((m) => `item ${m.itemId}`).join(', ')}); ` +
+          'refusing to choose one automatically — delete the duplicate on Manage Products',
       );
     }
     if (!matches.length) return null;
@@ -1538,7 +1578,7 @@ export class Uploader {
    * product — while the checks that actually establish the listing is right run
    * either way. When a check does fail the caller repairs for real.
    */
-  async _completeExistingProduct(product, live, { before = null, verifyOnly = false } = {}) {
+  async _completeExistingProduct(product, live, { before = null, verifyOnly = false, justFound = false } = {}) {
     const itemId = live.itemId;
     const desiredPhotoCount = productImageFiles(product).length;
     let media = { live, refused: 0 };
@@ -1555,8 +1595,14 @@ export class Uploader {
       await this._finish(product);
     }
 
-    await this.gotoManage();
-    const verified = await this._findActiveProduct(product);
+    // `justFound` means the caller located this listing on Manage Products a
+    // moment ago and has not navigated since, so looking it up again reads the
+    // same page for the same answer — another 4s search per product.
+    let verified = live;
+    if (!justFound) {
+      await this.gotoManage();
+      verified = await this._findActiveProduct(product);
+    }
     if (!verified || verified.itemId !== itemId) {
       throw new Error(`Could not verify repaired IndiaMART item ${itemId}`);
     }
@@ -1783,7 +1829,20 @@ export class Uploader {
     // in place so a retry cannot create a duplicate and partial media/specs are
     // completed before reporting success.
     await this.gotoManage();
-    const live = await this._timed('find the new listing', () => this._findActiveProduct(product));
+    // A listing IndiaMART has just created is not always searchable the
+    // instant Finish returns, and treating that as "the product was never
+    // created" is how four products failed while sitting live on the portal.
+    // Look again before concluding it is not there.
+    const live = await this._timed('find the new listing', async () => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const found = await this._findActiveProduct(product);
+        if (found || attempt === 3) return found;
+        log.warn(`  the new listing is not searchable yet; looking again (attempt ${attempt})`);
+        await this.page.waitForTimeout(4000);
+        await this.gotoManage();
+      }
+      return null;
+    });
     if (live) {
       // Matching purely by name is self-fulfilling: if the form had renamed an
       // existing listing, that listing now carries this product's name and
@@ -1796,17 +1855,28 @@ export class Uploader {
         );
       }
       const result = await this._timed('verify + complete', async () => {
+        // Everything from here on happens to a listing that already exists.
         // Finish went through, so try proving the listing before rewriting it.
         if (!finishError) {
           try {
-            return await this._completeExistingProduct(product, live, { before, verifyOnly: true });
+            return await this._completeExistingProduct(product, live, {
+              before,
+              verifyOnly: true,
+              justFound: true,
+            });
           } catch (error) {
             log.warn(`  verification found something to repair: ${firstLine(error)}`);
           }
         }
-        return this._completeExistingProduct(product, live, { before });
+        return this._completeExistingProduct(product, live, { before }).catch((error) =>
+          failedAfterCreating(live.itemId, error),
+        );
       });
-      await this._timed('collateral check', () => this._assertOnlyTouched(namedBefore, live.itemId, product));
+      await this._timed('collateral check', () =>
+        this._assertOnlyTouched(namedBefore, live.itemId, product).catch((error) =>
+          failedAfterCreating(live.itemId, error),
+        ),
+      );
       // Reached through Add Product on an item id that did not exist before, so
       // this is a newly created listing rather than a reconciled one.
       this._reportTimings();
