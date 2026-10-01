@@ -850,7 +850,12 @@ export class Uploader {
         await confirm.click({ timeout: 5000 });
         await confirm.waitFor({ state: 'hidden', timeout: 10000 });
       } else {
-        await uploadButton.waitFor({ state: 'hidden', timeout: 10000 });
+        // The crop popup has already attached the gallery, and the picker's
+        // own button can stay on screen afterwards — one product failed on
+        // "waiting for … + Upload photos from computer … to be hidden" with
+        // its photo in. Its disappearance is not a signal, so it is not
+        // treated as one; what the listing actually kept is counted later.
+        await uploadButton.waitFor({ state: 'hidden', timeout: 4000 }).catch(() => {});
       }
       images.forEach((image, index) => {
         log.info(`  photo ${index + 1}/${images.length} uploaded: ${path.basename(image)}`);
