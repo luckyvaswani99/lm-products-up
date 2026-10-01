@@ -114,7 +114,7 @@ test('a run obeys the saved toggle', async (t) => {
   });
 
   await t.test('it only skips the lookup, never the verification', () => {
-    assert.match(uploader, /skipDuplicateCheck \? null : await this\._findActiveProduct\(product\)/);
+    assert.match(uploader, /skipDuplicateCheck \? null : await this\._timed\('look up by name'/);
     const add = uploader.slice(uploader.indexOf('async addProduct('));
     assert.match(add, /_findActiveProduct\(product\)/, 'the result is still looked up after Finish');
     assert.match(add, /_assertOnlyTouched\(/, 'the collateral-rename check still runs');
@@ -217,5 +217,42 @@ test('a control behind a stale overlay is still reached', async (t) => {
     const verify = uploader.slice(uploader.indexOf('const unitIsOurs') >= 0 ? uploader.indexOf('const unitIsOurs') : uploader.indexOf('slugify(openedUnit)'));
     assert.doesNotMatch(verify.slice(0, 600), /throw new Error\([^)]*retained unit/);
     assert.match(uploader, /carries unit "\$\{openedUnit\}" where the product says/);
+  });
+});
+
+/**
+ * How many times one product makes the account search.
+ *
+ * Each search is a typed query plus Enter plus the list settling — about four
+ * seconds. A product was running four of them: the duplicate lookup, the
+ * baseline for the collateral check, the post-Finish lookup, and the collateral
+ * check itself. The first two ask the same page the same word a moment apart,
+ * and the last two are separated by nothing that writes.
+ */
+test('one product does not search the account over and over', async (t) => {
+  const uploader = fs.readFileSync(new URL('../src/uploader/indiamartUploader.js', import.meta.url), 'utf8');
+  const addProduct = uploader.slice(uploader.indexOf('async addProduct('));
+
+  await t.test('the lookup also yields the baseline, so the name is searched once', () => {
+    assert.match(uploader, /async _lookupByName\(product\)/);
+    assert.match(uploader, /return \{ match: \{ \.\.\.row, anchor, card \}, sameNamed \}/);
+    assert.match(addProduct, /lookup\?\.sameNamed \?\? \(await this\._timed\('name snapshot'/);
+  });
+
+  await t.test('a repair-free run reuses the reading it already took', () => {
+    assert.match(addProduct, /repairedAfterRead \? null : found\.sameNamed/);
+    assert.match(uploader, /knownAfter = null/);
+  });
+
+  await t.test('a repair still forces a fresh read', () => {
+    // Something was written after the listing was read, so the earlier
+    // reading can no longer answer the question.
+    assert.match(addProduct, /repairedAfterRead = true;/);
+    assert.match(uploader, /if \(!idsAfter\) \{\s*\n\s*await this\.gotoManage\(\);/);
+  });
+
+  await t.test('the lookup tries one spelling, not every spelling in turn', () => {
+    const lookup = uploader.slice(uploader.indexOf('async _lookupByName('));
+    assert.match(lookup.slice(0, 1200), /if \(matches\.length\) break;/);
   });
 });

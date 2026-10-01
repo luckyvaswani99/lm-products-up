@@ -1261,6 +1261,51 @@ export class Uploader {
     return new Map(rows.filter((row) => slugify(row.name) === wanted).map((row) => [row.itemId, row.name]));
   }
 
+  /**
+   * One search, two answers: this product's live listing, and every Active
+   * listing carrying its name.
+   *
+   * They were two separate searches a moment apart, on the same page, for the
+   * same word — the duplicate lookup and the baseline the collateral check
+   * compares against. At ~4s each that was pure repetition.
+   */
+  async _lookupByName(product) {
+    const candidateNames = [uploadProductName(product), product.seo?.name, product.name].filter(Boolean);
+    const candidates = new Set(candidateNames.map((name) => slugify(name)));
+    const submitted = slugify(uploadProductName(product));
+
+    let matches = [];
+    for (const name of [...new Set(candidateNames)]) {
+      // eslint-disable-next-line no-await-in-loop
+      const rows = await this._searchProducts(name);
+      matches = rows.filter((row) => row.itemId && candidates.has(slugify(row.name)));
+      if (matches.length) break;
+    }
+
+    // The baseline is only about the name actually submitted: that is the one
+    // another listing could end up wearing.
+    const sameNamed = new Map(
+      matches.filter((row) => slugify(row.name) === submitted).map((row) => [row.itemId, row.name]),
+    );
+
+    if (matches.length > 1) {
+      // Naming them is the difference between a dead end and a fix: these are
+      // the listings to look at, and one of them has to go before this product
+      // can be reconciled.
+      throw new Error(
+        `IndiaMART carries ${matches.length} Active listings named ` +
+          `"${uploadProductName(product)}" (${matches.map((m) => `item ${m.itemId}`).join(', ')}); ` +
+          'refusing to choose one automatically — delete the duplicate on Manage Products',
+      );
+    }
+    if (!matches.length) return { match: null, sameNamed };
+
+    const row = matches[0];
+    const anchor = this.page.locator(`#${row.anchorId}`);
+    const card = anchor.locator('xpath=ancestor::div[contains(@class,"MPSD_prdlstcont")][1]');
+    return { match: { ...row, anchor, card }, sameNamed };
+  }
+
   async _findActiveProduct(product) {
     const candidateNames = [uploadProductName(product), product.seo?.name, product.name].filter(Boolean);
     const candidates = new Set(candidateNames.map((name) => slugify(name)));
@@ -1313,9 +1358,14 @@ export class Uploader {
     return this._itemIdsNamed(uploadProductName(product));
   }
 
-  async _assertOnlyTouched(idsBefore, allowedItemId, product) {
-    await this.gotoManage();
-    const idsAfter = await this._itemIdsNamed(uploadProductName(product));
+  async _assertOnlyTouched(idsBefore, allowedItemId, product, knownAfter = null) {
+    // `knownAfter` is a reading already taken after the last write. Re-reading
+    // it would ask the same page the same question for the same answer.
+    let idsAfter = knownAfter;
+    if (!idsAfter) {
+      await this.gotoManage();
+      idsAfter = await this._itemIdsNamed(uploadProductName(product));
+    }
     const stolen = [...idsAfter.keys()].filter(
       (itemId) => itemId !== allowedItemId && !idsBefore.has(itemId),
     );
@@ -1785,7 +1835,10 @@ export class Uploader {
     // goes straight through Add Product. IndiaMART refuses a duplicate name
     // itself, and the checks after Finish are unchanged, so a wrong result is
     // still caught — it just is not avoided in advance.
-    const existing = skipDuplicateCheck ? null : await this._findActiveProduct(product);
+    // When the lookup runs it also yields the baseline the collateral check
+    // needs, so the name is searched once instead of twice.
+    const lookup = skipDuplicateCheck ? null : await this._timed('look up by name', () => this._lookupByName(product));
+    const existing = lookup?.match ?? null;
     if (skipDuplicateCheck) log.warn('  skipping the existing-listing lookup — adding directly');
     if (existing) {
       if (dryRun) {
@@ -1793,7 +1846,7 @@ export class Uploader {
         return { ok: false, before, after: before, dryRun: true, itemId: existing.itemId };
       }
       log.warn(`  exact existing item ${existing.itemId} found — repairing it instead of adding a duplicate`);
-      const namedBeforeRepair = await this._namedBefore(product);
+      const namedBeforeRepair = lookup.sameNamed;
       let repaired;
       try {
         repaired = await this._completeExistingProduct(product, existing, { before });
@@ -1813,7 +1866,7 @@ export class Uploader {
     // Record who already carries this name. Adding a product must produce a
     // NEW item id under it; an id that held the name beforehand turning up as
     // "the new listing" means an existing one was edited, never an upload.
-    const namedBefore = await this._timed('name snapshot', () => this._namedBefore(product));
+    const namedBefore = lookup?.sameNamed ?? (await this._timed('name snapshot', () => this._namedBefore(product)));
     const knownItemIds = new Set(namedBefore.keys());
 
     // Timed per phase: an upload is almost all waiting on IndiaMART, and
@@ -1846,16 +1899,17 @@ export class Uploader {
     // instant Finish returns, and treating that as "the product was never
     // created" is how four products failed while sitting live on the portal.
     // Look again before concluding it is not there.
-    const live = await this._timed('find the new listing', async () => {
+    const found = await this._timed('find the new listing', async () => {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
-        const found = await this._findActiveProduct(product);
-        if (found || attempt === 3) return found;
+        const result = await this._lookupByName(product);
+        if (result.match || attempt === 3) return result;
         log.warn(`  the new listing is not searchable yet; looking again (attempt ${attempt})`);
         await this.page.waitForTimeout(4000);
         await this.gotoManage();
       }
-      return null;
+      return { match: null, sameNamed: new Map() };
     });
+    const live = found.match;
     if (live) {
       // Matching purely by name is self-fulfilling: if the form had renamed an
       // existing listing, that listing now carries this product's name and
@@ -1881,14 +1935,18 @@ export class Uploader {
             log.warn(`  verification found something to repair: ${firstLine(error)}`);
           }
         }
+        repairedAfterRead = true;
         return this._completeExistingProduct(product, live, { before }).catch((error) =>
           failedAfterCreating(live.itemId, error),
         );
       });
       await this._timed('collateral check', () =>
-        this._assertOnlyTouched(namedBefore, live.itemId, product).catch((error) =>
-          failedAfterCreating(live.itemId, error),
-        ),
+        this._assertOnlyTouched(
+          namedBefore,
+          live.itemId,
+          product,
+          repairedAfterRead ? null : found.sameNamed,
+        ).catch((error) => failedAfterCreating(live.itemId, error)),
       );
       // Reached through Add Product on an item id that did not exist before, so
       // this is a newly created listing rather than a reconciled one.
