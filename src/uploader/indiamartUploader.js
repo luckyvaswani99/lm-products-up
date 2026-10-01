@@ -1921,6 +1921,9 @@ export class Uploader {
             `product being created. Check that item on Manage Products; nothing else was changed.`,
         );
       }
+      // Only a repair writes anything after the listing was read, so only a
+      // repair needs the account read again for the collateral check.
+      let repairedAfterRead = false;
       const result = await this._timed('verify + complete', async () => {
         // Everything from here on happens to a listing that already exists.
         // Finish went through, so try proving the listing before rewriting it.
