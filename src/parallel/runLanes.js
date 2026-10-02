@@ -12,7 +12,7 @@ import { uploadNameKey } from '../listingKey.js';
 import { loadUploadSettings } from '../uploadSettings.js';
 import { browserSessionGone, duplicateListingNames, uploadBlockers, REPEATED_FAILURE_LIMIT } from '../pipeline.js';
 import { confirmLoggedIn, openContext } from '../browser/session.js';
-import { Breaker, Semaphore, SharedPacer } from './gate.js';
+import { Breaker, Semaphore, SharedPacer, isWorkRateLimited } from './gate.js';
 import { LaneStore } from './laneStore.js';
 import { laneSessionDir, loadLanes } from './laneConfig.js';
 
@@ -126,8 +126,11 @@ async function laneExtract(lane, shared, { limit }) {
   const ids = await shared.store.write((store) =>
     records.map((record) => {
       const { product } = store.upsert(record, { refresh: true });
-      // Remember which lane's category this came from, so a later single-lane
-      // run still knows the group this product was meant for.
+      // Remember the lane AND its group. The lane is what lets a later
+      // upload-only run find this product again without reading the category
+      // page a second time, which matters because extraction is the half that
+      // runs into the rate limit.
+      product.lane = lane.id;
       if (lane.group) product.group = lane.group;
       return product.id;
     }),
@@ -140,6 +143,35 @@ async function laneExtract(lane, shared, { limit }) {
     );
   }
   log.ok(`${lane.id}: ${products.length} product(s) extracted and claimed`);
+  return products;
+}
+
+/**
+ * The products this lane already extracted on an earlier run.
+ *
+ * Extraction is the half the rate limit bites: 192 product pages in one sitting
+ * earned a 429 even through the shared budget, and re-reading them to get back
+ * to the same products would earn another. So an upload-only run picks up what
+ * is already stored, matched by the lane that extracted it.
+ */
+async function laneStored(lane, shared) {
+  const ids = shared.store.read((store) =>
+    store
+      .all()
+      .filter((product) => {
+        if (product.lane) return product.lane === lane.id;
+        // Records from a run before the lane was recorded: the group on them
+        // was written by this lane's own extract, and each lane has its own
+        // group, so it identifies the lane just as well. Falling back to it
+        // beats re-reading 192 product pages to learn something already known.
+        return !!lane.group && product.group === lane.group;
+      })
+      .map((product) => product.id),
+  );
+  const { products } = await shared.store.claimFor(lane.id, ids);
+  // Record it now, so the next run does not need the fallback.
+  await shared.store.write(() => products.forEach((product) => { product.lane = lane.id; }));
+  log.ok(`${lane.id}: ${products.length} product(s) already extracted`);
   return products;
 }
 
@@ -238,7 +270,21 @@ async function laneUpload(lane, products, shared, { dryRun }) {
   if (!todo.length) return { published: 0, failed: notReady.length, pending: 0 };
 
   const sessionDir = await prepareLaneProfile(lane);
-  const up = new Uploader({ sessionDir, label: lane.id });
+  const up = new Uploader({
+    sessionDir,
+    label: lane.id,
+    // A 429 on the portal is the same per-IP fact as one on the public site,
+    // so it holds every lane off instead of only slowing this one down — but
+    // only when it is the WORK being refused. The portal's analytics beacon
+    // gets throttled on its own schedule, and reading that as a refusal held
+    // all five lanes for a minute at a time while every product request was
+    // being served normally.
+    onRateLimited: (url) => {
+      if (!isWorkRateLimited(url)) return;
+      shared.breaker.trip(RATE_LIMIT.backoffMs[0], `HTTP 429 on ${new URL(url).pathname.slice(0, 50)}`);
+      shared.budget.reset();
+    },
+  });
   await up.open();
   let lastReason = null;
   let repeats = 0;
@@ -342,6 +388,10 @@ export async function runLanes({
   dryRun = false,
   maxUploading = DEFAULT_MAX_UPLOADING,
   scrapeOnly = false,
+  // Upload what is already extracted, without reading any category page again.
+  // Extraction is the half that hits the rate limit, so repeating it to reach
+  // products already in the store costs a block and gains nothing.
+  uploadOnly = false,
 } = {}) {
   if (activeRun) throw new Error('a lane run is already going');
   const lanes = (laneInput?.length ? laneInput : loadLanes()).filter((lane) => lane.enabled !== false);
@@ -363,7 +413,7 @@ export async function runLanes({
 
   activeRun = shared;
   try {
-    return await execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly });
+    return await execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly, uploadOnly });
   } finally {
     // Cleared however the run ends. Left set after a failure, it would refuse
     // every later run with "a lane run is already going".
@@ -371,7 +421,7 @@ export async function runLanes({
   }
 }
 
-async function execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly }) {
+async function execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly, uploadOnly }) {
   log.step(
     `lanes: ${lanes.length} categor${lanes.length === 1 ? 'y' : 'ies'} in parallel ` +
       `(${maxUploading} uploading at a time, one shared IndiaMART request budget)`,
@@ -392,7 +442,9 @@ async function execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly 
   const uploadSlots = pLimit(Math.max(1, maxUploading));
   const results = await Promise.allSettled(
     lanes.map(async (lane) => {
-      const products = await laneExtract(lane, shared, { limit });
+      const products = uploadOnly
+        ? await laneStored(lane, shared)
+        : await laneExtract(lane, shared, { limit });
       if (!products.length) return { lane: lane.id, published: 0, failed: 0, pending: 0, products: 0 };
       await laneImages(lane, products, shared);
       if (scrapeOnly) {

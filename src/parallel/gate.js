@@ -255,4 +255,33 @@ export class Claims {
   }
 }
 
+/**
+ * Does a 429 on this URL mean IndiaMART is refusing our work?
+ *
+ * Not every 429 is about us. Driving the seller portal, the throttled requests
+ * were `track.indiamart.com/imlytics/events` — the page's own analytics beacon,
+ * fired several times per product view. Treating those as a refusal held all
+ * five upload lanes for 60s at a time while the portal was in fact serving
+ * every product request normally, which made the safety net the slowest thing
+ * in the run.
+ *
+ * So only the endpoints that carry the work count: the seller portal's ajax
+ * calls and the public product pages. Analytics, tracking and third-party
+ * beacons are ignored however often they are refused.
+ */
+const TRACKING = /(^|\.)track\.indiamart\.com$|(^|\.)analytics\.|googletagmanager|doubleclick|yandex|clarity\.ms/i;
+const TRACKING_PATH = /\/imlytics\/|\/events\b|\/collect\b|\/watch\//i;
+
+export function isWorkRateLimited(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (TRACKING.test(parsed.hostname)) return false;
+  if (TRACKING_PATH.test(parsed.pathname)) return false;
+  return /(^|\.)indiamart\.com$|(^|\.)imimg\.com$/i.test(parsed.hostname);
+}
+
 export { sleep };

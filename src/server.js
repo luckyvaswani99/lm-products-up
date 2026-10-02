@@ -217,6 +217,7 @@ app.post('/api/lanes/run', (req, res) => {
         limit: body.limit,
         dryRun: !!body.dryRun,
         scrapeOnly: !!body.scrapeOnly,
+        uploadOnly: !!body.uploadOnly,
         maxUploading: body.maxUploading,
       }),
     );

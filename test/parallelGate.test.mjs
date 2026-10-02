@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Breaker, Claims, Mutex, Semaphore, SharedPacer } from '../src/parallel/gate.js';
+import { Breaker, Claims, Mutex, Semaphore, SharedPacer, isWorkRateLimited } from '../src/parallel/gate.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -184,4 +184,31 @@ test('Claims releasing is safe to call twice and never frees another lane’s ho
   release(); // the first lane's stale release must not drop lane two's hold
   assert.equal(typeof second, 'function');
   assert.deepEqual(claims.heldNames(), ['x']);
+});
+
+test('only a 429 on the actual work stops the lanes', () => {
+  // Measured while five lanes were uploading: the throttled requests were the
+  // page's own analytics beacon, fired several times per product view. Reading
+  // those as a refusal held every lane for 60s at a time while the portal was
+  // serving every product request normally.
+  assert.equal(
+    isWorkRateLimited('https://track.indiamart.com/imlytics/events'),
+    false,
+    'the analytics beacon is not the work',
+  );
+  assert.equal(isWorkRateLimited('https://analytics.google.com/g/collect?v=2'), false);
+  assert.equal(isWorkRateLimited('https://mc.yandex.ru/watch/51115208/1'), false);
+
+  // These are the requests that carry the upload and the extraction.
+  assert.equal(
+    isWorkRateLimited('https://seller.indiamart.com/miscreact/ajaxrequest/seller/product/manageproducts/fetchProducts'),
+    true,
+  );
+  assert.equal(isWorkRateLimited('https://www.indiamart.com/proddetail/zelgor-250mg-tablet-2853857766355.html'), true);
+  assert.equal(isWorkRateLimited('https://uploading.imimg.com/uploadimage'), true);
+
+  // Anything else, and anything unparseable, is not ours to react to.
+  assert.equal(isWorkRateLimited('https://example.com/whatever'), false);
+  assert.equal(isWorkRateLimited('not a url'), false);
+  assert.equal(isWorkRateLimited(''), false);
 });

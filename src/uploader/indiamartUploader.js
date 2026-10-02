@@ -317,17 +317,36 @@ export class Uploader {
    * @param label prefixes this uploader's log lines, so five lanes writing to
    *   one log can still be read.
    */
-  constructor({ sessionDir = null, label = '' } = {}) {
+  /**
+   * @param sessionDir which Chromium profile to drive. Defaults to the shared
+   *   one; a category lane passes its own so five lanes can upload at once.
+   * @param label prefixes this uploader's log lines, so five lanes writing to
+   *   one log can still be read.
+   * @param onRateLimited called with the refused URL whenever the seller portal
+   *   answers 429. The scraper already backs off on its own, but the portal did
+   *   not report one at all — a 429 was seen in its console while a group menu
+   *   was opening and nothing in this tool noticed. The limit is counted per IP,
+   *   so one lane being refused is a fact about all five, and the lane runner
+   *   uses this to hold every lane off rather than keep knocking.
+   */
+  constructor({ sessionDir = null, label = '', onRateLimited = null } = {}) {
     this.ctx = null;
     this.page = null;
     this.sessionDir = sessionDir;
     this.label = label;
+    this.onRateLimited = onRateLimited;
   }
 
   async open() {
     const { ctx, page } = await openContext(this.sessionDir ? { sessionDir: this.sessionDir } : {});
     this.ctx = ctx;
     this.page = page;
+    if (this.onRateLimited) {
+      page.on('response', (response) => {
+        if (response.status() !== 429) return;
+        this.onRateLimited(response.url());
+      });
+    }
     if (!(await isLoggedIn(page))) {
       await ctx.close();
       throw new Error('Not logged in to IndiaMART. Run `npm run login` first.');
