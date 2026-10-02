@@ -531,6 +531,10 @@ export async function runUpload({
           const r = await up.addProduct(p, { dryRun, skipDuplicateCheck });
           if (dryRun) continue;
           if (r.ok) {
+            // Kept on the product, not only in the log: a log is truncated on
+            // the next restart, and then checking what published against the
+            // account means searching every product by name.
+            p.itemId = r.itemId;
             store.markStage(p, 'uploaded', 'done');
             // Name the exact IndiaMART item and whether it was created or
             // reconciled, so a run can be checked against the account.

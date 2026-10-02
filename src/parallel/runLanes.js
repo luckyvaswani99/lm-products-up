@@ -318,7 +318,14 @@ async function laneUpload(lane, products, shared, { dryRun }) {
           );
           continue;
         }
-        await shared.store.write((store) => store.markStage(product, 'uploaded', 'done'));
+        await shared.store.write((store) => {
+          // Keep the IndiaMART item id ON the product, not only in the log.
+          // Checking 78 published products against the account meant searching
+          // every one of them by name because the id lived in a log file that
+          // the next server restart truncated.
+          product.itemId = result.itemId;
+          store.markStage(product, 'uploaded', 'done');
+        });
         log.ok(
           `${lane.id}: ${result.created ? 'created' : 'reconciled'} ✓ item ${result.itemId} ` +
             `(${result.photoCount} photo(s), PDF ${result.pdfName})`,
