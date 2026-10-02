@@ -1455,6 +1455,35 @@ export class Uploader {
    * name, price and unit. It is set from the listing's card on Manage
    * Products: the "Group" link opens a chip menu of the account's groups
    * (`span.MPSD_Groupmenutxt[data-catid]`) plus a "+ Create New Group" field.
+   *
+   * What the portal actually does, measured on this account rather than
+   * assumed, because a run of ten products reported "group not set … shows
+   * group "Pharmaceutical Injections" instead of "Erectile Dysfunction
+   * Medicine"" and the group the user typed was never applied:
+   *
+   * - "+ Create New Group" POSTs to managegroup/groupsave with only
+   *   `{glusr_usr_id, grp_name, product_section, module}` — no item id. It
+   *   CREATES a group and does not put this product in it. When the name is
+   *   already taken it still answers HTTP 200 `{"status":"success"}` with
+   *   `data.CODE "500"` and `data.MESSAGE "This Group Name Already Exists"`,
+   *   which is why ignoring the response looked like it had worked.
+   * - Clicking an existing group's chip sends NO request at all. Verified four
+   *   ways — the chip, its `span.SLC_cp` wrapper, the `li`, and a real
+   *   mouse down/up at its coordinates — each closed the menu and changed
+   *   nothing. The chip does carry a `click` listener; the app simply declines.
+   * - Every listing already carries a group: IndiaMART files new ones under a
+   *   category group such as "Pharmaceutical Tablets" on its own, and the
+   *   Group row offers no "+ Add" the way the Category row does.
+   *
+   * So the group is applied where it can be, the portal's own answer is
+   * reported when it refuses, and a listing that cannot be moved says exactly
+   * that instead of failing with a mismatch nobody can act on.
+   *
+   * Every control is scoped to this listing's own card. That is not what was
+   * breaking this — a search leaves one card on the page — but it is the only
+   * safe shape: a page-wide chip click would move an unrelated live listing
+   * into the group, the same hazard that once renamed another listing through
+   * a page-wide `#nameOfProduct`.
    */
   async setProductGroup(product, live, groupName) {
     const wanted = String(groupName || '').trim();
@@ -1466,7 +1495,7 @@ export class Uploader {
     }
 
     await live.card.locator('span', { hasText: /^Group$/ }).first().click({ timeout: 10000 });
-    const menu = this.page.locator('div[class*="MPSD_Gro"]').first();
+    const menu = live.card.locator('div[class*="MPSD_Gro"]').filter({ visible: true }).first();
     await menu.waitFor({ state: 'visible', timeout: 10000 });
 
     // Show every group the account has, not only the first page of chips.
@@ -1476,25 +1505,51 @@ export class Uploader {
       await this.page.waitForTimeout(1200);
     }
 
-    // Match an existing group case-insensitively so a second run reuses it.
-    const existing = await this.page.evaluate((name) => {
-      const chip = [...document.querySelectorAll('span.MPSD_Groupmenutxt[data-catid]')].find(
+    // Match an existing group case-insensitively so a second run reuses it —
+    // read from THIS card's chips, which is also the list we are allowed to
+    // click. Every card carries the same account-wide groups, so nothing is
+    // missed by not looking at the others.
+    // Addressed by position rather than by a selector built from the name, so a
+    // group containing a quote or a bracket cannot change which chip is clicked.
+    const chips = live.card.locator('span.MPSD_Groupmenutxt[data-catid]');
+    const match = await chips.evaluateAll((spans, name) => {
+      const index = spans.findIndex(
         (span) => (span.getAttribute('data-catname') || '').trim().toLowerCase() === name.toLowerCase(),
       );
-      return chip ? chip.getAttribute('data-catname') : '';
+      return index < 0 ? null : { index, name: (spans[index].getAttribute('data-catname') || '').trim() };
     }, wanted);
+    const existing = match?.name || '';
 
-    if (existing) {
-      await this.page
-        .locator(`span.MPSD_Groupmenutxt[data-catname="${existing}"]`)
-        .first()
-        .click({ timeout: 10000 });
+    let refusedBy = '';
+    if (match) {
+      await chips.nth(match.index).click({ timeout: 10000 });
     } else {
       await menu.getByText('+ Create New Group').first().click({ timeout: 10000 });
-      const field = this.page.locator('#addNewGroupName');
+      // Scoped to the card for the reason in the comment above: this id is not
+      // unique on Manage Products.
+      const field = live.card.locator('#addNewGroupName').first();
       await field.waitFor({ state: 'visible', timeout: 10000 });
       await field.fill(wanted);
-      await this.page.getByText('Done', { exact: true }).last().click({ timeout: 10000 });
+      const done = live.card.getByText('Done', { exact: true }).last();
+      await done.waitFor({ state: 'visible', timeout: 10000 });
+      // The portal's answer to "create this group" is the only place it ever
+      // explains itself, so it is read instead of discarded.
+      const saved = detachable(
+        this.page.waitForResponse(
+          (response) =>
+            response.request().method() === 'POST' && response.url().includes('managegroup/groupsave'),
+          { timeout: 20000 },
+        ),
+      );
+      await done.click({ timeout: 10000 });
+      refusedBy = await saved
+        .then(async (response) => {
+          const data = JSON.parse(await response.text())?.data || {};
+          const code = String(data.CODE || '');
+          return code && code !== '200' ? `${data.MESSAGE || `code ${code}`}` : '';
+        })
+        .catch(() => '');
+      if (refusedBy) log.warn(`  IndiaMART on creating the group: ${refusedBy}`);
     }
     await this.page.waitForTimeout(2500);
 
@@ -1506,8 +1561,15 @@ export class Uploader {
     }
     const applied = await this._cardGroup(verified.card);
     if (applied.toLowerCase() !== wanted.toLowerCase()) {
+      // Say which of the two things went wrong, so it is actionable: the group
+      // could not be created, or the listing could not be moved into it.
       throw new Error(
-        `IndiaMART item ${live.itemId} shows group "${applied || 'none'}" instead of "${wanted}"`,
+        refusedBy
+          ? `IndiaMART would not create the group "${wanted}" (${refusedBy}); ` +
+            `item ${live.itemId} is still in "${applied || 'no group'}"`
+          : `IndiaMART left item ${live.itemId} in "${applied || 'no group'}" instead of "${wanted}" — ` +
+            'its group menu accepts the click without sending any request, so a listing that already ' +
+            'carries a group has to be moved by hand under Products > Manage Groups',
       );
     }
     return { group: applied, changed: true, created: !existing };
