@@ -277,6 +277,40 @@ async function dismissModal(modal) {
 }
 
 /**
+ * Close the photo picker's own shell, `#photodocpopup`.
+ *
+ * The crop popup is what actually attaches the gallery, and it closes itself.
+ * The picker that opened it does not always go with it, and it is a full-page
+ * layer: it sits over Save and Continue, so the NEXT step of the same product
+ * fails with "Could not click active Add Product Save and Continue; visible
+ * layers: photodocpopup". Six products in one run were lost that way, which
+ * made it the single biggest cause of failure in a three-lane run.
+ *
+ * Only called once the photos are in, so dismissing it cannot lose anything —
+ * and what the listing actually kept is counted later regardless.
+ *
+ * @returns true when it is gone (or was never there).
+ */
+export async function dismissPhotoPicker(page) {
+  const picker = page.locator('#photodocpopup');
+  if (!(await picker.isVisible().catch(() => false))) return true;
+  const closers = [
+    picker.locator('[class*="close" i], [aria-label="Close" i]').first(),
+    picker.getByText('×', { exact: true }).first(),
+    picker.getByText('Cancel', { exact: true }).last(),
+  ];
+  for (const closer of closers) {
+    if (!(await closer.isVisible().catch(() => false))) continue;
+    await clickThrough(closer, 3000).catch(() => {});
+    if (await picker.waitFor({ state: 'hidden', timeout: 3000 }).then(() => true).catch(() => false)) {
+      return true;
+    }
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+  return picker.waitFor({ state: 'hidden', timeout: 2000 }).then(() => true).catch(() => false);
+}
+
+/**
  * Click a control, and if something invisible is sitting over it, run its own
  * handler instead.
  *
@@ -288,7 +322,7 @@ async function dismissModal(modal) {
  * neighbouring control, and the caller still verifies the outcome: the popup
  * has to close, or the step fails as before.
  */
-async function clickThrough(locator, timeout = 10000) {
+export async function clickThrough(locator, timeout = 10000) {
   try {
     await locator.click({ timeout });
     return 'clicked';
@@ -931,6 +965,12 @@ export class Uploader {
         // treated as one; what the listing actually kept is counted later.
         await uploadButton.waitFor({ state: 'hidden', timeout: 4000 }).catch(() => {});
       }
+      // The picker shell is a full-page layer and it does not always leave with
+      // the crop popup. Left open, it covers Save and Continue and costs the
+      // product its upload, so it is closed here rather than discovered later.
+      if (!(await dismissPhotoPicker(p))) {
+        log.warn('  the photo picker layer would not close; Save and Continue may be covered');
+      }
       images.forEach((image, index) => {
         log.info(`  photo ${index + 1}/${images.length} uploaded: ${path.basename(image)}`);
       });
@@ -1188,6 +1228,9 @@ export class Uploader {
     if (await crop.isVisible().catch(() => false)) {
       throw new Error(`IndiaMART image review popup kept reopening ${stage}`);
     }
+    // The picker that opened the review is a separate layer and can outlast it.
+    // Every caller of this is about to click something underneath.
+    await dismissPhotoPicker(p);
   }
 
   async _finish(product, { fillSpecifications = true } = {}) {
@@ -1206,7 +1249,11 @@ export class Uploader {
         if ((await saveContinue.getAttribute('aria-disabled')) === 'true') {
           throw new Error('IndiaMART has disabled Save and Continue');
         }
-        await saveContinue.click({ timeout: 10000 });
+        // Reach the control's own handler when a leftover portal layer is over
+        // it, exactly as the photo controls and Finish already do. The button
+        // is enabled and in place in every one of these failures; the only
+        // thing wrong is what is on top of it.
+        await clickThrough(saveContinue, 10000);
         break;
       } catch (cause) {
         const blockedAgain = await crop.isVisible().catch(() => false);
