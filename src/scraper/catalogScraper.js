@@ -102,12 +102,12 @@ async function readDetail(page, url, name, reader) {
  * for the pages that yielded specs; urls that stayed empty are absent, never
  * filled in with a placeholder.
  */
-export async function readProductPages(urls, { headful = false } = {}) {
+export async function readProductPages(urls, { headful = false, budget = null, breaker = null } = {}) {
   const browser = await chromium.launch({ headless: !headful });
   const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
   const found = new Map();
-  const reader = new PagedReader();
+  const reader = new PagedReader({ budget, breaker });
   try {
     for (const [index, url] of urls.entries()) {
       log.info(`  re-reading ${index + 1}/${urls.length}: ${url.split('/').pop().slice(0, 50)}`);
@@ -135,7 +135,10 @@ export async function readProductPages(urls, { headful = false } = {}) {
  *
  * @returns {Promise<object[]>} raw product records for the store
  */
-export async function scrapeCatalog(urls, { limit = 0, detail = true, headful = false } = {}) {
+export async function scrapeCatalog(
+  urls,
+  { limit = 0, detail = true, headful = false, budget = null, breaker = null } = {},
+) {
   const browser = await chromium.launch({ headless: !headful });
   const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
@@ -181,7 +184,9 @@ export async function scrapeCatalog(urls, { limit = 0, detail = true, headful = 
 
     if (detail) {
       const detailPage = await ctx.newPage();
-      const reader = new PagedReader();
+      // When several category lanes run at once they are handed one shared
+      // budget, because IndiaMART counts the limit per IP, not per lane.
+      const reader = new PagedReader({ budget, breaker });
       const withDetail = results.filter((record) => record._detailUrl);
       let enriched = 0;
       let read = 0;

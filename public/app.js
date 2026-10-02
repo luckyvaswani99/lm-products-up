@@ -941,3 +941,107 @@ $('#toggleImageAi').addEventListener('change', async (event) => {
     toast(error.message, 'err', 5000);
   }
 });
+
+/* ------------------------------ category lanes ------------------------------
+ * Five seller category pages, each extracted and uploaded by its own browser
+ * window with its own product group. The lane set is saved on the server, like
+ * the upload toggles, so a refresh cannot leave a run doing something other
+ * than what the page shows.
+ *
+ * The group is a <select> filled from the account's own groups rather than a
+ * text box: a category page's name is not a group name — this seller has a
+ * pain-killer category and the account has no pain-killer group — so typing one
+ * would file real listings under a group nobody picked.
+ * -------------------------------------------------------------------------- */
+const lanesState = { lanes: [], accountGroups: [] };
+
+function laneGroupOptions(selected) {
+  const known = lanesState.accountGroups.map((group) => group.name);
+  // Keep a saved group that is not in the loaded list, so loading the account's
+  // groups can never silently drop a choice already made.
+  const names = [...new Set([...(selected ? [selected] : []), ...known])];
+  const chosen = (name) => (name === selected ? ' selected' : '');
+  return [
+    `<option value=""${selected ? '' : ' selected'}>— no group —</option>`,
+    ...names.map((name) => {
+      const found = lanesState.accountGroups.find((group) => group.name === name);
+      const count = found ? ` (${found.products})` : '';
+      return `<option value="${escapeHtml(name)}"${chosen(name)}>${escapeHtml(name)}${count}</option>`;
+    }),
+  ].join('');
+}
+
+function renderLanes(lanes = lanesState.lanes) {
+  lanesState.lanes = lanes;
+  const host = $('#lanesList');
+  if (!host) return;
+  host.innerHTML = lanes
+    .map(
+      (lane, index) => `
+      <div class="lane-row ${lane.enabled ? '' : 'off'}" data-lane="${index}">
+        <label class="lane-state">
+          <input type="checkbox" data-lane-enabled ${lane.enabled ? 'checked' : ''} /> ${escapeHtml(lane.id)}
+        </label>
+        <span class="lane-url" title="${escapeHtml(lane.url)}">${escapeHtml(lane.url)}</span>
+        <select class="inp" data-lane-group>${laneGroupOptions(lane.group)}</select>
+        <span class="lane-state">${lane.group ? '🏷' : '—'}</span>
+      </div>`,
+    )
+    .join('');
+  const withoutGroup = lanes.filter((lane) => lane.enabled && !lane.group).length;
+  const note = $('#lanesNote');
+  if (note) {
+    note.textContent = withoutGroup
+      ? `${withoutGroup} enabled lane(s) have no group — those uploads will not be grouped`
+      : `${lanes.filter((lane) => lane.enabled).length} lane(s) enabled`;
+  }
+}
+
+async function saveLanes() {
+  try {
+    const result = await api('PUT', '/api/lanes', { lanes: lanesState.lanes });
+    renderLanes(result.lanes);
+  } catch (error) {
+    toast(error.message, 'err', 5000);
+  }
+}
+
+document.addEventListener('change', (event) => {
+  const row = event.target.closest('.lane-row');
+  if (!row) return;
+  const lane = lanesState.lanes[Number(row.dataset.lane)];
+  if (!lane) return;
+  if (event.target.matches('[data-lane-enabled]')) lane.enabled = event.target.checked;
+  if (event.target.matches('[data-lane-group]')) lane.group = event.target.value;
+  saveLanes();
+});
+
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('#loadAccountGroups, #lanesRun, #lanesScrapeOnly');
+  if (!button) return;
+  if (button.id === 'loadAccountGroups') {
+    button.disabled = true;
+    try {
+      const result = await api('GET', '/api/account-groups');
+      lanesState.accountGroups = result.groups || [];
+      renderLanes();
+      toast(`${lanesState.accountGroups.length} product group(s) read from your account`);
+    } catch (error) {
+      toast(error.message, 'err', 6000);
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  const scrapeOnly = button.id === 'lanesScrapeOnly';
+  try {
+    await api('POST', '/api/lanes/run', { scrapeOnly });
+    toast(scrapeOnly ? 'Extracting every enabled category' : 'Lanes started — one browser window per category');
+  } catch (error) {
+    toast(error.message, 'err', 6000);
+  }
+});
+
+api('GET', '/api/lanes')
+  .then((result) => renderLanes(result.lanes || []))
+  .catch(() => {});

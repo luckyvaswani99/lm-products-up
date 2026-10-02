@@ -130,6 +130,32 @@
         <button class="btn ghost" data-act="skiplive" title="Mark products already in your IndiaMART account as skipped">⏭ Skip live</button>
         <button class="btn primary" data-act="runall">▶ Run all</button>
       </div>
+
+      <!--
+        Category lanes: one seller category page per lane, each with its own
+        browser window and its own product group. The group is chosen from the
+        account's own list, never typed from the category name.
+      -->
+      <div class="group lanes-config">
+        <strong class="lanes-title">Category lanes</strong>
+        <button
+          class="btn ghost"
+          id="loadAccountGroups"
+          title="Read the product groups your IndiaMART account actually has, so each lane's group can be picked from them"
+        >🏷 Load my groups</button>
+        <button
+          class="btn ghost"
+          id="lanesScrapeOnly"
+          title="Extract and prepare photos for every lane, but do not upload. Useful for checking what a category holds first."
+        >⬇ Extract only</button>
+        <button
+          class="btn primary"
+          id="lanesRun"
+          title="Extract all enabled categories in parallel and upload each one from its own browser window"
+        >⚡ Run lanes</button>
+        <span id="lanesNote" class="muted"></span>
+      </div>
+      <div id="lanesList" class="lanes-list"></div>
     </section>
 
     <main>

@@ -26,6 +26,9 @@ import { login, logout, openBrowser, isMarkedLoggedIn } from './browser/session.
 import { testSeo } from './ai/seoContent.js';
 import { loadSeoSettings, saveSeoSettings } from './ai/seoSettings.js';
 import { loadUploadSettings, saveUploadSettings } from './uploadSettings.js';
+import { loadLanes, saveLanes } from './parallel/laneConfig.js';
+import { lanesRunning, runLanes, stopLanes } from './parallel/runLanes.js';
+import { readAccountGroups } from './parallel/accountGroups.js';
 import { testImage } from './images/aiImage.js';
 import {
   SHARED_PRODUCT_PDF_MAX_BYTES,
@@ -184,6 +187,56 @@ app.put('/api/upload-settings', (req, res) => {
     fail(res, e);
   }
 });
+// ---------- category lanes ----------
+app.get('/api/lanes', (_req, res) => {
+  try {
+    ok(res, { lanes: loadLanes() });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+app.put('/api/lanes', (req, res) => {
+  try {
+    ok(res, { lanes: saveLanes(req.body?.lanes || []) });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+/** The account's real product groups, so a lane's group is chosen, not typed. */
+app.get('/api/account-groups', (_req, res) => {
+  if (job.name) return fail(res, new Error(`busy: "${job.name}" is already running`));
+  readAccountGroups()
+    .then((groups) => ok(res, { groups }))
+    .catch((e) => fail(res, e));
+});
+app.post('/api/lanes/run', (req, res) => {
+  try {
+    const body = req.body || {};
+    runJob('lanes', () =>
+      runLanes({
+        limit: body.limit,
+        dryRun: !!body.dryRun,
+        scrapeOnly: !!body.scrapeOnly,
+        maxUploading: body.maxUploading,
+      }),
+    );
+    ok(res);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+/**
+ * Ask a lane run to stop. Cooperative on purpose: each lane finishes the
+ * product it is on and leaves the rest pending, which is the same state a
+ * re-run starts from — rather than a listing half created in five windows.
+ */
+app.post('/api/lanes/stop', (_req, res) => {
+  if (!lanesRunning()) return fail(res, new Error('no lane run is going'));
+  stopLanes();
+  ok(res);
+});
+
 app.get('/api/seo-settings', (_req, res) => {
   try {
     ok(res, { seoSettings: loadSeoSettings() });

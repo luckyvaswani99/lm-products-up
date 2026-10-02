@@ -42,14 +42,31 @@ export const RATE_LIMIT = {
  * @throws {RateLimitError} when the limit persists through every backoff.
  */
 export class PagedReader {
-  constructor({ spacing = RATE_LIMIT.spacingMs, batchSize = RATE_LIMIT.batchSize } = {}) {
+  /**
+   * @param budget optional process-wide pacer (see src/parallel/gate.js). The
+   *   limit is counted per IP, so when several category lanes read at once they
+   *   must share ONE budget — a reader pacing only itself is five times the
+   *   rate on the single address being counted, which turns the limit from
+   *   something avoided into something guaranteed. Without it, this reader
+   *   paces itself exactly as before.
+   */
+  constructor({ spacing = RATE_LIMIT.spacingMs, batchSize = RATE_LIMIT.batchSize, budget = null, breaker = null } = {}) {
     this.spacing = spacing;
     this.batchSize = batchSize;
+    this.budget = budget;
+    this.breaker = breaker;
     this.readsSincePause = 0;
     this.lastRequestAt = 0;
   }
 
   async _pace(page) {
+    // A 429 anywhere in the process is a statement about this IP, so wait out
+    // any hold another lane put on before spending a turn.
+    if (this.breaker) await this.breaker.wait();
+    if (this.budget) {
+      await this.budget.take();
+      return;
+    }
     const since = Date.now() - this.lastRequestAt;
     if (this.lastRequestAt && since < this.spacing) {
       await page.waitForTimeout(this.spacing - since);
@@ -82,9 +99,13 @@ export class PagedReader {
         `    HTTP 429 Too Many Requests — waiting ${Math.round(wait / 1000)}s before retrying ` +
           `(${attempt + 1}/${RATE_LIMIT.backoffMs.length})`,
       );
+      // Hold the other lanes off too, then wait it out. Four lanes carrying on
+      // knocking is what keeps the door shut longer.
+      if (this.breaker) this.breaker.trip(wait, `HTTP 429 on ${url.split('/').pop().slice(0, 40)}`);
       await page.waitForTimeout(wait);
       // A fresh budget: stop counting the requests that were refused.
       this.readsSincePause = 0;
+      this.budget?.reset();
     }
     throw new RateLimitError(
       'indiamart.com is rate limiting this connection (HTTP 429). Nothing further was read; ' +

@@ -23,9 +23,16 @@ import { log } from '../logger.js';
  * and more of the specification form are in view at once, so there is less
  * scrolling into view before every click.
  */
-export async function openContext({ headful = config.indiamart.headful } = {}) {
-  fs.mkdirSync(config.indiamart.sessionDir, { recursive: true });
-  const ctx = await chromium.launchPersistentContext(config.indiamart.sessionDir, {
+export async function openContext({
+  headful = config.indiamart.headful,
+  // One Chromium profile can only be driven by one process at a time — a second
+  // launch answers "Opening in existing browser session" and fails. Category
+  // lanes therefore each get their own profile directory, cloned from the
+  // logged-in one, so five windows can work at once.
+  sessionDir = config.indiamart.sessionDir,
+} = {}) {
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const ctx = await chromium.launchPersistentContext(sessionDir, {
     headless: !headful,
     // Headless has no window to follow, so it keeps an explicit large page.
     viewport: headful ? null : { width: 1920, height: 1080 },

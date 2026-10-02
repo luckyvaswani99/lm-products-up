@@ -311,13 +311,21 @@ async function dismissPopups(page) {
 }
 
 export class Uploader {
-  constructor() {
+  /**
+   * @param sessionDir which Chromium profile to drive. Defaults to the shared
+   *   one; a category lane passes its own so five lanes can upload at once.
+   * @param label prefixes this uploader's log lines, so five lanes writing to
+   *   one log can still be read.
+   */
+  constructor({ sessionDir = null, label = '' } = {}) {
     this.ctx = null;
     this.page = null;
+    this.sessionDir = sessionDir;
+    this.label = label;
   }
 
   async open() {
-    const { ctx, page } = await openContext();
+    const { ctx, page } = await openContext(this.sessionDir ? { sessionDir: this.sessionDir } : {});
     this.ctx = ctx;
     this.page = page;
     if (!(await isLoggedIn(page))) {
@@ -1573,6 +1581,45 @@ export class Uploader {
       );
     }
     return { group: applied, changed: true, created: !existing };
+  }
+
+  /**
+   * The product groups this account actually carries, with how many listings
+   * are in each.
+   *
+   * Read from the group menu on a listing's card, which is where the portal
+   * renders them (`span.MPSD_Groupmenutxt[data-catid]`, plus `data-mappedprdcnt`
+   * for the count). Exists so a category lane's group is CHOSEN from the
+   * account's own list rather than typed from a category name — the seller's
+   * "pain-killer-medicines" page has no matching group on the account, and
+   * inventing one would file real listings under a group nobody picked.
+   */
+  async readAccountGroups() {
+    await this.gotoManage();
+    const card = this.page.locator('div.MPSD_prdlstcont').first();
+    await card.waitFor({ state: 'visible', timeout: 20000 });
+    await card.locator('span', { hasText: /^Group$/ }).first().click({ timeout: 10000 });
+    // The menu shows one page of chips plus "More"; the full list is behind it.
+    const menu = card.locator('div[class*="MPSD_Groupmenu"]').filter({ visible: true }).first();
+    await menu.waitFor({ state: 'visible', timeout: 10000 });
+    const more = menu.getByText(/^More$/).first();
+    if (await more.isVisible().catch(() => false)) {
+      await more.click().catch(() => {});
+      await this.page.waitForTimeout(1500);
+    }
+    const groups = await card
+      .locator('span.MPSD_Groupmenutxt[data-catid]')
+      .evaluateAll((spans) =>
+        spans.map((span) => ({
+          name: (span.getAttribute('data-catname') || '').trim(),
+          id: span.getAttribute('data-catid') || '',
+          products: Number(span.getAttribute('data-mappedprdcnt') || 0),
+        })),
+      );
+    // Deduplicate by id: the menu can render a group in both its used and
+    // suggested lists.
+    const unique = new Map(groups.filter((group) => group.name).map((group) => [group.id, group]));
+    return [...unique.values()].sort((a, b) => b.products - a.products);
   }
 
   /** Find the exact live listing for a product and put it in a group. */

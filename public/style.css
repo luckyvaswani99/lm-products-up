@@ -240,3 +240,19 @@ main {
 #uploadPreviewFigure { padding: 10px; border: 1px solid #254a35; border-radius: 10px; background: #102219; }
 #uploadPreviewFigure figcaption { color: #8fe0aa; }
 .upload-preview-gallery img { border-color: #2e7d46; }
+
+/* Category lanes: one row per seller category page, each with its own browser
+   profile and product group. Laid out as a grid so five rows stay readable. */
+.lanes-title { font-size: 13px; color: var(--text); }
+.lanes-list { display: grid; gap: 6px; padding: 0 22px 14px; }
+.lane-row {
+  display: grid; gap: 8px; align-items: center;
+  grid-template-columns: auto minmax(220px, 1fr) minmax(170px, 260px) auto;
+}
+.lane-row .lane-url { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-row .lane-state { font-size: 11px; color: var(--muted); }
+.lane-row.off { opacity: 0.45; }
+@media (max-width: 900px) {
+  .lane-row { grid-template-columns: auto 1fr; }
+  .lane-row .lane-url { grid-column: 1 / -1; }
+}

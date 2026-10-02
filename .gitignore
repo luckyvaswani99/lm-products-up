@@ -6,6 +6,9 @@ node_modules/
 
 # Logged-in Chromium profile — contains live IndiaMART session cookies.
 .session/
+# One copy of that profile per category lane, so five browsers can run at once.
+# Same live cookies, so the same rule applies.
+.session-lanes/
 
 # Local CodeGraph index.
 .codegraph/
