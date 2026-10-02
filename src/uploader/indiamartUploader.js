@@ -244,19 +244,35 @@ function detachable(promise) {
  * Its own close control is tried first, then Escape. Nothing here assumes a
  * particular markup: the caller checks the dialog afterwards, so a control that
  * does nothing is simply a control that did nothing.
+ *
+ * Two things cost a product its upload ("PDF preview dialog would not close")
+ * and are handled rather than assumed away: these dialogs fade out, so the
+ * answer was read before the dialog had gone, and the file-picker layer that
+ * opened them can still be over their close button — the same interception the
+ * photo controls hit — so the click is made to reach the control's own handler.
  */
 async function dismissModal(modal) {
   const closers = [
     modal.locator('[class*="close" i], [aria-label="Close" i]').first(),
     modal.getByText('×', { exact: true }).first(),
   ];
-  for (const closer of closers) {
-    if (!(await closer.isVisible().catch(() => false))) continue;
-    await closer.click({ timeout: 3000 }).catch(() => {});
-    if (!(await modal.isVisible().catch(() => false))) return true;
+  const gone = () =>
+    modal
+      .waitFor({ state: 'hidden', timeout: 3000 })
+      .then(() => true)
+      .catch(() => false);
+
+  // Two passes: a dialog that ignores the first click because its own script is
+  // still mid-animation accepts the second.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const closer of closers) {
+      if (!(await closer.isVisible().catch(() => false))) continue;
+      await clickThrough(closer, 3000).catch(() => {});
+      if (await gone()) return true;
+    }
+    await modal.page().keyboard.press('Escape').catch(() => {});
+    if (await gone()) return true;
   }
-  await modal.page().keyboard.press('Escape').catch(() => {});
-  await modal.page().waitForTimeout(500);
   return !(await modal.isVisible().catch(() => false));
 }
 
@@ -778,7 +794,32 @@ export class Uploader {
     return (await editor.innerText()).replace(/\s+/g, ' ').trim();
   }
 
+  /**
+   * The portal's photo picker is as unreliable as its document picker, and in
+   * the same three ways: the "Upload photos from computer" button never shows,
+   * the file chooser never opens, or the cropper opens and reads none of the
+   * files. Four products in one batch of forty failed that way — and in all
+   * three cases IndiaMART has been handed nothing, so the listing is exactly
+   * as it was and the step is worth one clean retry.
+   *
+   * Nothing else is retried here on purpose: once the cropper has read a file,
+   * a second attempt could attach it twice.
+   */
   async _uploadPhotos(product) {
+    try {
+      return await this._uploadPhotosOnce(product);
+    } catch (error) {
+      const worthRetrying =
+        error.handedOver === false && /Timeout \d+ms exceeded|read only 0 of \d+ photos/i.test(error.message);
+      if (!worthRetrying) throw error;
+      log.warn(`  photo picker did not open; retrying once (${firstLine(error)})`);
+      await this._drainImageReview('before retrying the photos').catch(() => {});
+      await this.page.waitForTimeout(3000);
+      return this._uploadPhotosOnce(product);
+    }
+  }
+
+  async _uploadPhotosOnce(product) {
     const images = productImageFiles(product);
     if (!images.length) {
       log.warn('  no images to upload — listing will be created without a photo');
@@ -790,6 +831,10 @@ export class Uploader {
     const photoCard = form.locator('.MPSD_PRImg').filter({ hasText: 'Add Photo' }).last();
     const prepared = [];
     const uploadImageRuntime = getUploadImageRuntime();
+    // Up to this point IndiaMART has been handed nothing, so a failure leaves
+    // the listing untouched and the caller may start over. Once the cropper's
+    // Upload Photos has been clicked that stops being true.
+    let handedOver = false;
 
     try {
       for (let index = 0; index < images.length; index += 1) {
@@ -829,12 +874,14 @@ export class Uploader {
         const confirmed = await waitForCropSelection(p, crop, images.length);
         log.info(`  crop popup holds ${confirmed}/${images.length} selected photo(s)`);
         const uploadPhoto = crop.getByText(/^Upload Photos?$/, { exact: true }).last();
+        handedOver = true;
         await clickThrough(uploadPhoto);
         logPhotoRejections(await readPhotoRejections(p), 'this new listing');
         await crop.waitFor({ state: 'hidden', timeout: 30000 });
       } else {
         // Older portal variants attach the gallery without a cropper.
         log.warn('  no crop popup appeared; relying on the Add Photos confirmation');
+        handedOver = true;
         await p.waitForTimeout(2500);
       }
 
@@ -868,7 +915,9 @@ export class Uploader {
       const cancel = p.locator('#photodocpopup').getByText('Cancel', { exact: true }).last();
       if (await cancel.isVisible().catch(() => false)) await cancel.click({ force: true }).catch(() => {});
       await dismissPopups(p);
-      throw new Error(`Gallery upload failed (${images.length} photos): ${e.message}`, { cause: e });
+      const failure = new Error(`Gallery upload failed (${images.length} photos): ${e.message}`, { cause: e });
+      failure.handedOver = handedOver;
+      throw failure;
     } finally {
       for (const item of prepared) {
         if (item.temporary) fs.unlinkSync(item.filePath);
@@ -1197,7 +1246,13 @@ export class Uploader {
     // If IndiaMART still reports missing specs, re-read the rendered form once
     // and require every field to be selected before retrying Finish.
     if (await p.getByText('Missing Specification', { exact: false }).count().catch(() => 0)) {
-      log.warn('  still missing specs — retrying');
+      // This fires on every product on this account, and it is not a fault:
+      // IndiaMART's medicine forms carry rows the source listing never states
+      // (Purity, Certification, Pharmacopoeia Standard), and inventing values
+      // for them is not an option. The re-read is kept anyway — the portal
+      // re-renders the specification step after Finish and can drop a row it
+      // had accepted, which only a fresh pass over the form would catch.
+      log.warn('  IndiaMART still reports missing specs — re-reading the form before submitting again');
       result = await fillSpecs(p, product);
       if (result.missingRequired.length) {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
