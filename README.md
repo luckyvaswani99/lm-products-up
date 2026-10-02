@@ -33,6 +33,34 @@ Fill in `.env`:
 | `SUPPLIER_NAME` / `SUPPLIER_CITY` | injected into the generated copy |
 | `SCRAPE_URLS` | IndiaMART pages to pull products from |
 
+### Setting it up on another machine
+
+```bash
+git clone https://github.com/luckyvaswani99/lm-products-up.git
+cd lm-products-up
+npm install                 # also downloads Chromium for Playwright
+cp .env.example .env        # then paste your keys in
+npm run web                 # http://localhost:5199
+```
+
+Then, in order, the four things git deliberately does **not** carry — each is
+either a secret or this machine's own state:
+
+1. **`.env`** — your API keys. Copy them across by hand.
+2. **The IndiaMART login.** `.session/` holds live cookies and is git-ignored,
+   so sign in again on the new machine (dashboard **Sign in**, or
+   `npm run login`) with your mobile + OTP. Do this *before* any lane run.
+3. **The shared product brochure PDF.** It lives under `data/`, which is
+   git-ignored, so select it again from the toolbar. Without it every upload
+   fails with "No shared product PDF selected".
+4. **Background removal**, if you want it — the venv is per machine. See the
+   section below, and read the Python-version and Visual C++ notes there before
+   installing: the failures they describe look nothing like their causes.
+
+`data/products.json` is also not carried, so the new machine starts with an
+empty product list. That is usually what you want; if you need the same
+products, copy `data/` across yourself.
+
 ## Web dashboard (recommended)
 
 Prefer clicking over the CLI? Launch the UI:
@@ -119,8 +147,88 @@ src/
   browser/session            persistent-profile login (OTP by hand, once)
   uploader/indiamartUploader Add-Product automation (name→specs→Finish)
   uploader/specFiller        fills IndiaMART's category-specific mandatory specs
+  parallel/gate              shared request budget, breaker, lock, claims
+  parallel/runLanes          several category pages at once (see below)
+  parallel/laneConfig        the lanes, on disk (data/lanes.json)
+tools/
+  verifyPublished.mjs        check published products against the real account
+  checkFailed.mjs            is a "failed" product actually live? (run before a retry)
 data/                        products.json, images/, ai-images/  (git-ignored)
 ```
+
+## Category lanes: several categories at once
+
+One lane per seller category page. Each lane extracts its own category, prepares
+its own photos, and uploads from its **own browser window** with its own
+product group. Configure them in the dashboard's **Category lanes** row — the
+set is saved on the server, so a refresh cannot leave a run doing something
+other than what the page shows.
+
+- **🏷 Load my groups** reads the product groups your account actually has, so a
+  lane's group is picked from them. Do not type one: a category page's name is
+  not a group name — this seller has a pain-killer category and the account's
+  group is "Painkillers Medicine".
+- **⬇ Extract only** extracts and prepares photos without uploading.
+- **⚡ Run lanes** does the whole thing.
+
+`runLanes({ uploadOnly: true })` uploads what the lanes already extracted
+without reading any category page again. Use it after a run that was cut short:
+extraction is the half that runs into the rate limit, so re-reading those pages
+to reach products already stored costs a block and gains nothing.
+
+### How many lanes
+
+**Three.** Measured on this account, same products, same machine:
+
+| Lanes | Per product | Effective rate |
+|-------|-------------|----------------|
+| 1 | 42–52s | 80/hour |
+| **3** | 55–86s | **164/hour** |
+| 5 | 129–166s | 120/hour |
+
+Five is *slower* than three. The portal is the bottleneck, not this tool: with
+five sessions on one account every step stretches about threefold (PDF 8s→36s,
+photos 5s→38s, opening Manage Products 2s→35s), which more than eats the extra
+parallelism, and it produces more failures.
+
+### What is shared, and why
+
+The lanes overlap their local work but **not** their requests to IndiaMART,
+because the rate limit is counted per IP. Measured: a single reader gets about
+99 product pages before HTTP 429; five lanes with five private budgets got 88
+between them and then shut the whole run out. So one `SharedPacer` spaces every
+request from any lane, one `Breaker` holds *all* lanes off when any of them is
+refused, one `Mutex` guards the store (it is a JSON file read and written whole
+— unguarded, five lanes lose four lanes' progress to whoever saves last), and
+`Claims` give each product one lane and each listing name one lane at a time.
+
+A 429 on IndiaMART's analytics beacon is not a refusal of your work and is
+ignored; only the endpoints that carry the work count.
+
+### Lane browser profiles
+
+Each lane gets its own Chromium profile under `.session-lanes/<lane>`, copied
+from the signed-in `.session` the first time it runs — one profile driven by two
+processes fails with "Opening in existing browser session". Both directories
+hold live login cookies and are git-ignored. Sign in once (`npm run login` or
+the dashboard's Sign in) *before* the first lane run; a lane whose profile is
+not signed in fails before it touches anything.
+
+## Checking a run against the account
+
+A run's log says what the uploader believed. It is not evidence: a product can
+publish and then report an error, because some failures happen *after* Finish.
+
+```bash
+node tools/verifyPublished.mjs      # every "published" product, searched on the account
+node tools/checkFailed.mjs          # is a "failed" product actually live?
+```
+
+**Run `checkFailed` before retrying anything.** It found five products that were
+live while reading as failed; retrying them blind would have created five
+duplicate listings. Retry only with **Find duplicates: on** — then the uploader
+finds the listing by name and completes it in place instead of creating a second
+one.
 
 ## Optional: local background removal
 
