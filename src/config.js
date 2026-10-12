@@ -33,7 +33,7 @@ export const config = {
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean),
-      text: process.env.IMAGE_TEXT_WATERMARK || process.env.SUPPLIER_NAME || 'Om Shanti Medical',
+      text: process.env.IMAGE_TEXT_WATERMARK || process.env.SUPPLIER_NAME || 'Bajrang Export',
     },
     gemini: {
       apiKey: process.env.GEMINI_API_KEY || '',
@@ -72,7 +72,7 @@ export const config = {
   },
 
   supplier: {
-    name: process.env.SUPPLIER_NAME || 'Om Shanti Medical',
+    name: process.env.SUPPLIER_NAME || 'Bajrang Export',
     city: process.env.SUPPLIER_CITY || 'Nagpur',
     state: process.env.SUPPLIER_STATE || 'Maharashtra',
   },
