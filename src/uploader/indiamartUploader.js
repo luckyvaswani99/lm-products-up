@@ -7,7 +7,7 @@ import { loadUploadSettings } from '../uploadSettings.js';
 import { getUploadImageRuntime, prepareUploadImage } from '../images/uploadImagePreparation.js';
 import { productImageFiles } from '../images/productImageFiles.js';
 import { openContext, isLoggedIn } from '../browser/session.js';
-import { fillSpecs } from './specFiller.js';
+import { fillSpecs, fillMissingFromName } from './specFiller.js';
 import { slugify } from '../store.js';
 import {
   DESCRIPTION_MAX_CHARS,
@@ -381,6 +381,23 @@ export class Uploader {
         this.onRateLimited(response.url());
       });
     }
+    // IndiaMART intermittently answers a step with a "Retry After Sometime !!!"
+    // dialog that blocks everything behind it until OK is pressed; by hand,
+    // pressing OK carries on. Playwright runs this whenever the dialog appears —
+    // including in the middle of an action that it is blocking — so the upload
+    // continues instead of timing out behind the dialog.
+    this.retryDialogs = 0;
+    await page.addLocatorHandler(page.getByText(/Retry After Sometime/i).first(), async () => {
+      this.retryDialogs += 1;
+      log.warn(`  IndiaMART showed "Retry After Sometime" — pressing OK (${this.retryDialogs} so far)`);
+      await page
+        .getByText(/^\s*OK\s*$/i)
+        .or(page.getByRole('button', { name: /^\s*OK\s*$/i }))
+        .last()
+        .click({ timeout: 5000 })
+        .catch(() => {});
+      await page.waitForTimeout(800);
+    });
     if (!(await isLoggedIn(page))) {
       await ctx.close();
       throw new Error('Not logged in to IndiaMART. Run `npm run login` first.');
@@ -1000,23 +1017,43 @@ export class Uploader {
    * step is worth one clean retry before the product is called failed.
    */
   async _uploadPdf() {
-    try {
-      return await this._uploadPdfOnce();
-    } catch (error) {
-      if (!/waitForResponse|Timeout \d+ms exceeded/i.test(error.message)) throw error;
-      log.warn(`  PDF step timed out against IndiaMART; retrying once (${error.message.split('\n')[0]})`);
-      // Whatever the failed attempt left on screen is still covering the PDF
-      // card, and a retry that walks into it only fails on an intercepted
-      // click — which is how one product reported a 5s timeout on a control
-      // that was never the problem.
-      const leftOver = this.page.locator('#savephotoModal_g02.show-modal');
-      if (await leftOver.isVisible().catch(() => false)) {
-        await dismissModal(leftOver);
-        log.warn('  cleared the dialog the failed attempt left open');
+    let timedOutOnce = false;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this._uploadPdfOnce();
+      } catch (error) {
+        // The upload endpoint itself answers {"Code":500,"Reason":"Retry After
+        // Sometime !!!"} when it is busy. Pressing OK and uploading again is what
+        // works by hand, so wait a little longer each time and go again.
+        const busy = error.cause?.portalBusy === true;
+        const timedOut = /waitForResponse|Timeout \d+ms exceeded/i.test(error.message);
+        if (!(busy && attempt < 7) && !(timedOut && !busy && !timedOutOnce)) throw error;
+        if (!busy) timedOutOnce = true;
+        const waitSeconds = busy ? [20, 40, 60, 90, 120, 150][Math.min(attempt, 6) - 1] : 4;
+        log.warn(
+          busy
+            ? `  IndiaMART asked to retry the PDF upload later — waiting ${waitSeconds}s (attempt ${attempt}/7)`
+            : `  PDF step timed out against IndiaMART; retrying once (${error.message.split('\n')[0]})`,
+        );
+        // Whatever the failed attempt left on screen is still covering the PDF
+        // card, and a retry that walks into it only fails on an intercepted
+        // click — which is how one product reported a 5s timeout on a control
+        // that was never the problem.
+        const leftOver = this.page.locator('#savephotoModal_g02.show-modal');
+        if (await leftOver.isVisible().catch(() => false)) {
+          await dismissModal(leftOver);
+          log.warn('  cleared the dialog the failed attempt left open');
+        }
+        await this._drainImageReview('before retrying the PDF').catch(() => {});
+        // The hidden file input still holds the PDF from the failed attempt, and
+        // choosing the same file again fires no change event, so the retry would
+        // never send a request. Measured: with the input cleared every retry posts.
+        await this.page
+          .locator('#editProductPopup .pdfBlog input[type="file"]')
+          .evaluateAll((inputs) => inputs.forEach((input) => { input.value = ''; }))
+          .catch(() => {});
+        await this.page.waitForTimeout(waitSeconds * 1000);
       }
-      await this._drainImageReview('before retrying the PDF').catch(() => {});
-      await this.page.waitForTimeout(4000);
-      return this._uploadPdfOnce();
     }
   }
 
@@ -1060,9 +1097,17 @@ export class Uploader {
       ));
       await chooser.setFiles(pdfPath);
 
-      const [uploadResponse, conversionResponse] = await this._timed('PDF · upload + convert', () =>
-        Promise.all([uploadPromise, conversionPromise]),
-      );
+      // The upload answer is read first: when the portal is busy it says so at
+      // once ("Retry After Sometime !!!") and the conversion never starts, so
+      // waiting on both made every busy moment cost the full 45s.
+      const uploadResponse = await this._timed('PDF · upload', () => uploadPromise);
+      const uploadBody = await uploadResponse.text().catch(() => '');
+      if (/retry after sometime/i.test(uploadBody)) {
+        throw Object.assign(new Error(`IndiaMART document upload is busy: ${uploadBody.slice(0, 160)}`), {
+          portalBusy: true,
+        });
+      }
+      const conversionResponse = await this._timed('PDF · convert', () => conversionPromise);
       const parseResponse = async (response, service) => {
         const body = await response.text();
         let data;
@@ -1233,7 +1278,7 @@ export class Uploader {
     await dismissPhotoPicker(p);
   }
 
-  async _finish(product, { fillSpecifications = true } = {}) {
+  async _finish(product, { fillSpecifications = true, nameOnly = false } = {}) {
     const p = this.page;
     const form = p.locator('#editProductPopup');
     const crop = p.locator('#im-crop-block.is-visible-imcrp');
@@ -1296,7 +1341,10 @@ export class Uploader {
     await this._drainImageReview('before specifications');
 
     let result = { missingRequired: [] };
-    if (fillSpecifications) {
+    if (nameOnly) {
+      // Top-up of an existing listing: only the rows the product name can answer.
+      result = { missingRequired: [], done: await fillMissingFromName(p, product) };
+    } else if (fillSpecifications) {
       result = await fillSpecs(p, product);
       if (result.missingRequired.length) {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
@@ -1327,7 +1375,9 @@ export class Uploader {
       // re-renders the specification step after Finish and can drop a row it
       // had accepted, which only a fresh pass over the form would catch.
       log.warn('  IndiaMART still reports missing specs — re-reading the form before submitting again');
-      result = await fillSpecs(p, product);
+      result = nameOnly
+        ? { missingRequired: [], done: [...(result.done || []), ...(await fillMissingFromName(p, product))] }
+        : await fillSpecs(p, product);
       if (result.missingRequired.length) {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
       }
@@ -2006,6 +2056,33 @@ export class Uploader {
       missingSpecifications: stillMissing,
       leftBlank: leftBlank.map((field) => field.group),
     };
+  }
+
+  /**
+   * Fill Strength / Form / Composition from the product name on one exact live
+   * listing, only when its card says those fields are missing. Nothing else on
+   * the listing is changed: no photos, PDF, description or other specifications.
+   */
+  async topUpFromName(product) {
+    await this.gotoManage();
+    const live = await this._findActiveProduct(product);
+    if (!live) throw new Error(`Active IndiaMART product not found for "${uploadProductName(product)}"`);
+    const cardText = (await live.card.innerText().catch(() => '')) || '';
+    const missingCount = Number((cardText.match(/(\d+)\s+missing/i) || [])[1] || 0);
+    // The card lists the fields it still wants after "N missing", up to "View All".
+    const block = (cardText.split(/\d+\s+missing/i)[1] || '').split(/View All/i)[0];
+    const wanted = /\b(strength|dose|form|dosage form|composition|active ingredient)\b/i.test(block);
+    const listed = block.split('\n').map((line) => line.trim()).filter(Boolean).length;
+    if (!missingCount || (!wanted && listed >= missingCount)) {
+      return { ok: true, itemId: live.itemId, skipped: 'nothing the name can fill', missingBefore: missingCount };
+    }
+    await this._openExactEditor(product, live);
+    const result = await this._finish(product, { nameOnly: true });
+    await this.gotoManage();
+    const after = await this._findActiveProduct(product);
+    const afterText = (await after?.card.innerText().catch(() => '')) || '';
+    const missingAfter = Number((afterText.match(/(\d+)\s+missing/i) || [])[1] || 0);
+    return { ok: true, itemId: live.itemId, filled: result.done || [], missingBefore: missingCount, missingAfter };
   }
 
   /**

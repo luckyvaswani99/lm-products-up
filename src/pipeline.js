@@ -356,7 +356,9 @@ export function uploadBlockers(product) {
   const blockers = [];
   const specCount =
     Object.keys(product.specs || {}).length || Object.keys(product.seo?.specs || {}).length;
-  if (!specCount) blockers.push('no specifications');
+  // `allowNoSpecs` is set by hand for a product the user has explicitly asked to
+  // publish although neither its page nor its name states any specification.
+  if (!specCount && !product.allowNoSpecs) blockers.push('no specifications');
   if (!productImageFiles(product).length) blockers.push('no images');
   if (!(product.seo?.description || product.description || '').trim()) {
     blockers.push('no description');

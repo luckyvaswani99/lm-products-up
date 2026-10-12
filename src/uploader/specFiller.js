@@ -338,6 +338,87 @@ async function tryFillDetail(page, detail) {
   return { ...detail, value, filled: actual === value, cleared: !value && actual === '' };
 }
 
+
+// --- values the product's own NAME states -----------------------------------
+// The user's decision (2026-10-12): where the source listing carries no Strength,
+// Form or Composition, take them from the product name — and only from what the
+// name actually says. Nothing is chosen unless the name contains the value, or
+// (for Strength) states a single quantity the form has a place for.
+
+const singular = (word) => (word.length > 4 && word.endsWith('s') && !word.endsWith('ss') ? word.slice(0, -1) : word);
+
+/** Every 1-4 word run of the name, in the same normalised form as the options. */
+function nameGrams(name) {
+  const words = (String(name || '').toLowerCase().match(/[a-z0-9.%]+/g) || []).map(singular);
+  const grams = new Set();
+  for (let start = 0; start < words.length; start += 1) {
+    for (let size = 1; size <= 4 && start + size <= words.length; size += 1) {
+      const gram = comparable(words.slice(start, start + size).join(' '));
+      if (gram) grams.add(gram);
+    }
+  }
+  return grams;
+}
+
+/** The one quantity a name states ("20 mg", "0.25 %"), or '' when none or several. */
+export function strengthInName(name) {
+  const found = new Map();
+  for (const match of String(name || '').matchAll(/(\d+(?:\.\d+)?)\s*(mg|mcg|gm|g|ml|iu|units?|%)(?![a-z])/gi)) {
+    const text = `${match[1]} ${match[2].toLowerCase()}`;
+    found.set(comparable(text), text);
+  }
+  return found.size === 1 ? [...found.values()][0] : '';
+}
+
+function rowKind(label) {
+  const text = String(label || '').trim().toLowerCase();
+  if (/^(strength|dose|dose\/strength|dosage strength)$/.test(text)) return 'strength';
+  if (/^(form|dosage form)$/.test(text)) return 'form';
+  if (/^(composition|active ingredient|salt composition)$/.test(text)) return 'composition';
+  return '';
+}
+
+/**
+ * Fill the still-empty Strength / Form / Composition rows from the product name.
+ * Rows the source already answered (ticked, or deliberately left unset because the
+ * form cannot say what the source says) are never touched.
+ */
+export async function fillMissingFromName(page, product, { skipGroups = [] } = {}) {
+  const name = product.seo?.name || product.name || '';
+  const grams = nameGrams(name);
+  const rows = await readSpecRows(page).catch(() => []);
+  const done = [];
+  for (const row of rows) {
+    const kind = rowKind(row.label);
+    if (!kind || row.checked || skipGroups.includes(row.label)) continue;
+
+    const options = [...new Set(row.options)].filter((option) => comparable(option) && comparable(option) !== 'other');
+    const minLength = kind === 'composition' ? 4 : kind === 'form' ? 3 : 2;
+    const hits = options.filter((option) => {
+      const key = comparable(option);
+      return key.length >= minLength && grams.has(key);
+    });
+
+    let choice = '';
+    if (kind === 'form' && hits.length) {
+      choice = hits.sort((a, b) => comparable(b).length - comparable(a).length)[0];
+    } else if (hits.length === 1) {
+      choice = hits[0];
+    }
+
+    let result;
+    if (choice) {
+      result = await trySelect({ page, group: row.label, candidates: [choice] });
+    } else if (kind === 'strength' && !hits.length) {
+      const stated = strengthInName(name);
+      if (stated) result = await trySelect({ page, group: row.label, candidates: [stated], other: stated });
+    }
+    if (result?.selected) done.push(`${row.label}=${result.value} (from name)`);
+  }
+  if (done.length) log.info(`  from the product name: ${done.join(', ')}`);
+  return done;
+}
+
 /** Fill the spec step for a product. Returns a summary of what was set. */
 export async function fillSpecs(page, product) {
   const plan = deriveSpecPlan(product);
@@ -379,6 +460,7 @@ export async function fillSpecs(page, product) {
   // product actually contains.
   const rows = await readSpecRows(page).catch(() => []);
   done.push(...(await fillIngredientStrength(page, product, rows)));
+  done.push(...(await fillMissingFromName(page, product, { skipGroups: unrepresentable.map((field) => field.group) })));
 
   log.info(`  specs/details set: ${done.join(', ') || '(none)'}`);
   if (noSuchRow.length) {
