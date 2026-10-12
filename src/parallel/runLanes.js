@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import path from 'node:path';
 import pLimit from 'p-limit';
 import { config } from '../config.js';
 import { log } from '../logger.js';
@@ -111,8 +112,26 @@ async function assertLaneSignedIn(lane, sessionDir) {
 /** Extract one category page through the shared request budget. */
 async function laneExtract(lane, shared, { limit }) {
   log.step(`${lane.id}: extracting ${lane.url}`);
+  // Pages whose specifications and description are already stored.
+  const skipUrls = new Set(
+    shared.store.read((store) =>
+      store
+        .all()
+        .filter((p) => Object.keys(p.specs || {}).length && String(p.description || '').trim())
+        .map((p) => p.sourceUrl),
+    ),
+  );
+  // Products already published and wiped from the store live on in the ledger,
+  // so they are not read (or listed) a second time.
+  try {
+    const ledger = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'uploaded-ledger.json'), 'utf8'));
+    for (const entry of ledger) if (entry.sourceUrl) skipUrls.add(entry.sourceUrl);
+  } catch {
+    /* no ledger yet */
+  }
   const records = await scrapeCatalog([lane.url], {
     limit,
+    skipUrls,
     headful: false,
     budget: shared.budget,
     breaker: shared.breaker,
@@ -449,9 +468,12 @@ async function execute(lanes, shared, { limit, dryRun, maxUploading, scrapeOnly,
   const uploadSlots = pLimit(Math.max(1, maxUploading));
   const results = await Promise.allSettled(
     lanes.map(async (lane) => {
-      const products = uploadOnly
-        ? await laneStored(lane, shared)
-        : await laneExtract(lane, shared, { limit });
+      // Extraction skips pages already read, so what it returns is only the new
+      // products. Everything the lane holds that is not live yet (read on an
+      // earlier pass, upload failed or interrupted) is picked up from the store
+      // as well, otherwise a failed upload would never be retried.
+      if (!uploadOnly) await laneExtract(lane, shared, { limit });
+      const products = await laneStored(lane, shared);
       if (!products.length) return { lane: lane.id, published: 0, failed: 0, pending: 0, products: 0 };
       await laneImages(lane, products, shared);
       if (scrapeOnly) {

@@ -137,7 +137,7 @@ export async function readProductPages(urls, { headful = false, budget = null, b
  */
 export async function scrapeCatalog(
   urls,
-  { limit = 0, detail = true, headful = false, budget = null, breaker = null } = {},
+  { limit = 0, detail = true, headful = false, budget = null, breaker = null, skipUrls = null } = {},
 ) {
   const browser = await chromium.launch({ headless: !headful });
   const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1440, height: 900 } });
@@ -180,6 +180,17 @@ export async function scrapeCatalog(
         });
       }
       if (limit && results.length >= limit) break;
+    }
+
+    // Products already read in full on an earlier run are not read again: a
+    // second pass over them spends the per-IP page budget for nothing and is
+    // what runs a resumed extract into the 429 before it reaches the gaps.
+    if (skipUrls?.size) {
+      const before = results.length;
+      for (let i = results.length - 1; i >= 0; i -= 1) {
+        if (results[i]._detailUrl && skipUrls.has(results[i]._detailUrl)) results.splice(i, 1);
+      }
+      log.info(`  ${before - results.length} product(s) already read earlier — not read again`);
     }
 
     if (detail) {
