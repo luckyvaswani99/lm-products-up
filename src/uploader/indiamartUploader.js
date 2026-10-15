@@ -7,7 +7,7 @@ import { loadUploadSettings } from '../uploadSettings.js';
 import { getUploadImageRuntime, prepareUploadImage } from '../images/uploadImagePreparation.js';
 import { productImageFiles } from '../images/productImageFiles.js';
 import { openContext, isLoggedIn } from '../browser/session.js';
-import { fillSpecs, fillMissingFromName } from './specFiller.js';
+import { fillSpecs, fillMissingFromName, fillGivenSpecs } from './specFiller.js';
 import { slugify } from '../store.js';
 import {
   DESCRIPTION_MAX_CHARS,
@@ -1341,9 +1341,14 @@ export class Uploader {
     await this._drainImageReview('before specifications');
 
     let result = { missingRequired: [] };
+    // Top-up of an existing listing: either exactly the rows of a reviewed plan
+    // (product.explicitSpecs), or only the rows the product name can answer.
+    const topUp = async () =>
+      product.explicitSpecs
+        ? (await fillGivenSpecs(p, product.explicitSpecs)).done
+        : fillMissingFromName(p, product);
     if (nameOnly) {
-      // Top-up of an existing listing: only the rows the product name can answer.
-      result = { missingRequired: [], done: await fillMissingFromName(p, product) };
+      result = { missingRequired: [], done: await topUp() };
     } else if (fillSpecifications) {
       result = await fillSpecs(p, product);
       if (result.missingRequired.length) {
@@ -1376,7 +1381,7 @@ export class Uploader {
       // had accepted, which only a fresh pass over the form would catch.
       log.warn('  IndiaMART still reports missing specs — re-reading the form before submitting again');
       result = nameOnly
-        ? { missingRequired: [], done: [...(result.done || []), ...(await fillMissingFromName(p, product))] }
+        ? { missingRequired: [], done: [...(result.done || []), ...(await topUp())] }
         : await fillSpecs(p, product);
       if (result.missingRequired.length) {
         throw new Error(`Could not set required specifications: ${result.missingRequired.join(', ')}`);
@@ -2083,6 +2088,26 @@ export class Uploader {
     const afterText = (await after?.card.innerText().catch(() => '')) || '';
     const missingAfter = Number((afterText.match(/(\d+)\s+missing/i) || [])[1] || 0);
     return { ok: true, itemId: live.itemId, filled: result.done || [], missingBefore: missingCount, missingAfter };
+  }
+
+  /**
+   * Apply a reviewed plan of specification rows (product.explicitSpecs) to one
+   * exact live listing, and read the card back to report what is still missing.
+   * Nothing else on the listing is changed.
+   */
+  async applySpecPlan(product) {
+    await this.gotoManage();
+    const live = await this._findActiveProduct(product);
+    if (!live) throw new Error(`Active IndiaMART product not found for "${uploadProductName(product)}"`);
+    const cardText = (await live.card.innerText().catch(() => '')) || '';
+    const missingBefore = Number((cardText.match(/(\d+)\s+missing/i) || [])[1] || 0);
+    await this._openExactEditor(product, live);
+    const result = await this._finish(product, { nameOnly: true });
+    await this.gotoManage();
+    const after = await this._findActiveProduct(product);
+    const afterText = (await after?.card.innerText().catch(() => '')) || '';
+    const missingAfter = Number((afterText.match(/(\d+)\s+missing/i) || [])[1] || 0);
+    return { ok: true, itemId: live.itemId, filled: result.done || [], missingBefore, missingAfter };
   }
 
   /**

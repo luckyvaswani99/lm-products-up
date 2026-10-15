@@ -419,6 +419,28 @@ export async function fillMissingFromName(page, product, { skipGroups = [] } = {
   return done;
 }
 
+/**
+ * Set exactly the rows named in `specs` ({ "<row label>": "<value>" }) on the
+ * rendered specification step, and nothing else: rows already ticked are left
+ * alone, additional details (MOQ, delivery time) are not touched. The values come
+ * from a reviewed plan (see tools/applySpecPlan.mjs), not from this function.
+ */
+export async function fillGivenSpecs(page, specs = {}) {
+  const rows = await readSpecRows(page).catch(() => []);
+  const ticked = new Set(rows.filter((row) => row.checked).map((row) => row.label.toLowerCase()));
+  const done = [];
+  const notSet = [];
+  for (const [label, value] of Object.entries(specs)) {
+    if (ticked.has(label.toLowerCase())) continue;
+    const result = await trySelect({ page, group: label, candidates: [value], other: value });
+    if (result.selected) done.push(`${label}=${result.value}`);
+    else notSet.push(`${label}=${value}`);
+  }
+  if (done.length) log.info(`  from the reviewed plan: ${done.join(', ')}`);
+  if (notSet.length) log.warn(`  not set (no such row or option): ${notSet.join(', ')}`);
+  return { done, notSet };
+}
+
 /** Fill the spec step for a product. Returns a summary of what was set. */
 export async function fillSpecs(page, product) {
   const plan = deriveSpecPlan(product);
